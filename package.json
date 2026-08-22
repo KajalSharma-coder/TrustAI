@@ -1,0 +1,15 @@
+{
+  "name": "trustai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TrustAI - AI Output Verification System",
+  "scripts": {
+    "client": "npm --prefix client run dev",
+    "server": "npm --prefix server run dev",
+    "dev": "concurrently -n Backend,Frontend \"npm run dev --prefix server\" \"npm run dev --prefix client\"",
+    "build": "npm --prefix client run build"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

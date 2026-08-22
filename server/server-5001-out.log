@@ -1,0 +1,14 @@
+
+> trustai-server@0.1.0 dev
+> node src/server.js
+
+TrustAI server is running on port 5001
+[AI] Request received
+[AI] API key configured: true
+[AI] Starting Gemini request
+[AI] Gemini returned 20
+[AI] Gemini request timed out after 10023 ms
+[AI] Switching to fallback model
+[AI] Starting Gemini request
+[AI] Model response received in 8638 ms
+[AI] Generation successful in 18700 ms

@@ -1,0 +1,29 @@
+
+> trustai@0.1.0 dev
+> concurrently -n Backend,Frontend "npm run dev --prefix server" "npm run dev --prefix client"
+
+[Frontend] 
+[Frontend] > trustai-client@0.1.0 dev
+[Frontend] > vite
+[Frontend] 
+[Backend] 
+[Backend] > trustai-server@0.1.0 dev
+[Backend] > node src/server.js
+[Backend] 
+[Frontend] Port 5173 is in use, trying another one...
+[Frontend] 
+[Frontend]   [32m[1mVITE[22m v6.4.3[39m  [2mready in [0m[1m393[22m[2m[0m ms[22m
+[Frontend] 
+[Frontend]   [32m➜[39m  [1mLocal[22m:   [36mhttp://localhost:[1m5174[22m/[39m
+[Frontend] [2m  [32m➜[39m  [1mNetwork[22m[2m: use [22m[1m--host[22m[2m to expose[22m
+[Backend] TrustAI server is running on port 5000
+[Backend] [AI] Request received
+[Backend] [AI] API key configured: true
+[Backend] [AI] Primary model: gemini-3.7-flash
+[Backend] [AI] Calling Gemini... model: gemini-3.7-flash
+[Backend] [AI] Attempt 1
+[Backend] [AI] Gemini returned 503
+[Backend] [AI] Retrying...
+[Backend] [AI] Attempt 2
+[Backend] [AI] Gemini call successful
+[Backend] [AI] Generation successful

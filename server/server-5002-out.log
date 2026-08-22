@@ -1,0 +1,16 @@
+
+> trustai-server@0.1.0 dev
+> node src/server.js
+
+TrustAI server is running on port 5002
+[AI] Request received
+[AI] API key configured: true
+[AI] Starting Gemini request
+[AI] Gemini returned 429
+[AI] Temporary Gemini error. Retrying once...
+[AI] Starting Gemini request
+[AI] Gemini returned 429
+[AI] Switching to fallback model
+[AI] Starting Gemini request
+[AI] Model response received in 4395 ms
+[AI] Generation successful in 6352 ms
