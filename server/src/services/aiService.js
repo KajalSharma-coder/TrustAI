@@ -1,19 +1,13 @@
 import { GoogleGenAI } from "@google/genai";
 
-const DEFAULT_PRIMARY_MODEL = "gemini-3.7-flash";
-const DEFAULT_FALLBACK_MODEL = "gemini-3.6-flash";
-const REQUEST_TIMEOUT_MS = 10000;
-const OVERALL_TIMEOUT_MS = 20000;
-const MAX_ATTEMPTS = 2;
-const RETRY_DELAY_MS = 1000;
+const DEFAULT_MODEL_CHAIN = [
+  "gemini-3.5-flash-lite",
+  "gemini-3.6-flash",
+  "gemini-3.7-flash",
+];
+const REQUEST_TIMEOUT_MS = 15000;
 const TEMPORARY_STATUS_CODES = new Set([429, 500, 503]);
-const KNOWN_STATUS_CODES = new Set([400, 401, 403, 408, 429, 500, 503]);
-
-function wait(ms) {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
+const KNOWN_STATUS_CODES = new Set([400, 401, 403, 408, 429, 500, 502, 503, 504]);
 
 function extractStatusCode(error) {
   if (KNOWN_STATUS_CODES.has(error?.status)) {
@@ -25,7 +19,7 @@ function extractStatusCode(error) {
   }
 
   const message = error?.message || "";
-  const statusMatch = message.match(/\b(400|401|403|408|429|500|503)\b/);
+  const statusMatch = message.match(/\b(400|401|403|408|429|500|502|503|504)\b/);
 
   return statusMatch ? Number(statusMatch[1]) : null;
 }
@@ -47,84 +41,82 @@ function shouldTryFallback(error) {
 function createBusyError(message = "AI service is temporarily busy. Please try again.") {
   const error = new Error(message);
   error.isTemporaryGeminiUnavailable = true;
+  error.code = "AI_TEMPORARILY_UNAVAILABLE";
   return error;
 }
 
-function getRemainingMs(deadlineMs) {
-  return Math.max(deadlineMs - Date.now(), 0);
+function formatElapsed(elapsedMs) {
+  return `${(elapsedMs / 1000).toFixed(1)}s`;
 }
 
-async function generateWithModel(ai, model, prompt, deadlineMs) {
-  let lastError;
-
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
-    const remainingMs = getRemainingMs(deadlineMs);
-
-    if (remainingMs <= 0) {
-      throw createBusyError();
-    }
-
-    const controller = new AbortController();
-    const requestStartedAt = Date.now();
-    const timeoutMs = Math.min(REQUEST_TIMEOUT_MS, remainingMs);
-    const timeout = setTimeout(() => {
-      controller.abort();
-    }, timeoutMs);
-
-    try {
-      console.log("[AI] Starting Gemini request");
-
-      const response = await ai.models.generateContent({
-        model,
-        contents: prompt,
-        config: {
-          abortSignal: controller.signal,
-        },
-      });
-
-      const elapsedMs = Date.now() - requestStartedAt;
-      console.log(`[AI] Model response received in ${elapsedMs} ms`);
-
-      const content =
-        typeof response.text === "function" ? response.text() : response.text;
-
-      if (!content) {
-        throw new Error("Gemini returned an empty response");
-      }
-
-      return content;
-    } catch (error) {
-      lastError = error;
-      const elapsedMs = Date.now() - requestStartedAt;
-      const statusCode = extractStatusCode(error);
-
-      if (statusCode) {
-        console.log(`[AI] Gemini returned ${statusCode}`);
-      }
-
-      if (isTimeoutError(error)) {
-        console.log(`[AI] Gemini request timed out after ${elapsedMs} ms`);
-        const timeoutError = new Error("Gemini request timed out");
-        timeoutError.isGeminiTimeout = true;
-        lastError = timeoutError;
-      }
-
-      if (!isTemporaryError(lastError) || attempt === MAX_ATTEMPTS) {
-        break;
-      }
-
-      if (getRemainingMs(deadlineMs) <= RETRY_DELAY_MS) {
-        break;
-      }
-
-      console.log("[AI] Temporary Gemini error. Retrying once...");
-      await wait(RETRY_DELAY_MS);
-    } finally {
-      clearTimeout(timeout);
-    }
+function getErrorLabel(error) {
+  if (isTimeoutError(error)) {
+    return "timeout";
   }
 
-  throw lastError;
+  return extractStatusCode(error) || error?.code || "network error";
+}
+
+function getConfiguredModels() {
+  const explicitFallbackModels = [
+    process.env.GEMINI_FALLBACK_MODEL,
+    process.env.GEMINI_FALLBACK_MODELS,
+  ]
+    .filter(Boolean)
+    .join(",")
+    .split(",")
+    .map((model) => model.trim())
+    .filter(Boolean);
+
+  const envModels = [
+    process.env.GEMINI_MODEL,
+    ...explicitFallbackModels,
+    ...DEFAULT_MODEL_CHAIN,
+  ].filter(Boolean);
+
+  return [...new Set(envModels.map((model) => model.trim()).filter(Boolean))];
+}
+
+async function generateWithModel(ai, model, prompt) {
+  const controller = new AbortController();
+  const requestStartedAt = Date.now();
+  const timeout = setTimeout(() => {
+    controller.abort();
+  }, REQUEST_TIMEOUT_MS);
+
+  try {
+    console.log(`[AI] Trying model: ${model}`);
+
+    const response = await ai.models.generateContent({
+      model,
+      contents: prompt,
+      config: {
+        abortSignal: controller.signal,
+      },
+    });
+
+    const elapsedMs = Date.now() - requestStartedAt;
+    const content =
+      typeof response.text === "function" ? response.text() : response.text;
+
+    if (!content || !content.trim()) {
+      throw new Error("Gemini returned an empty response");
+    }
+
+    console.log(`[AI] Model succeeded: ${model}`);
+    console.log(`[AI] Response received in ${formatElapsed(elapsedMs)}`);
+
+    return content.trim();
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      const timeoutError = new Error("Gemini request timed out");
+      timeoutError.isGeminiTimeout = true;
+      throw timeoutError;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 export async function generateContentFromPrompt(prompt) {
@@ -140,32 +132,27 @@ export async function generateContentFromPrompt(prompt) {
     apiKey,
   });
 
-  const primaryModel = process.env.GEMINI_MODEL || DEFAULT_PRIMARY_MODEL;
-  const fallbackModel =
-    process.env.GEMINI_FALLBACK_MODEL || DEFAULT_FALLBACK_MODEL;
-  const deadlineMs = Date.now() + OVERALL_TIMEOUT_MS;
+  const models = getConfiguredModels();
+  let lastError;
 
-  try {
-    return await generateWithModel(ai, primaryModel, prompt, deadlineMs);
-  } catch (primaryError) {
-    if (!shouldTryFallback(primaryError) || fallbackModel === primaryModel) {
-      throw primaryError;
-    }
-
-    if (getRemainingMs(deadlineMs) <= 0) {
-      throw createBusyError();
-    }
-
-    console.log("[AI] Switching to fallback model");
-
+  for (const [index, model] of models.entries()) {
     try {
-      return await generateWithModel(ai, fallbackModel, prompt, deadlineMs);
-    } catch (fallbackError) {
-      if (shouldTryFallback(fallbackError)) {
-        throw createBusyError();
+      return await generateWithModel(ai, model, prompt);
+    } catch (error) {
+      lastError = error;
+      console.log(`[AI] ${model} failed: ${getErrorLabel(error)}`);
+
+      if (!shouldTryFallback(error) || index === models.length - 1) {
+        break;
       }
 
-      throw fallbackError;
+      console.log(`[AI] Trying fallback model: ${models[index + 1]}`);
     }
   }
+
+  if (shouldTryFallback(lastError)) {
+    throw createBusyError();
+  }
+
+  throw lastError;
 }

@@ -3,6 +3,7 @@ import dotenv from "dotenv";
 import express from "express";
 import aiRoutes from "./routes/aiRoutes.js";
 import healthRoutes from "./routes/healthRoutes.js";
+import verificationRoutes from "./routes/verificationRoutes.js";
 
 dotenv.config();
 
@@ -14,6 +15,7 @@ app.use(express.json());
 
 app.use("/api/health", healthRoutes);
 app.use("/api/ai", aiRoutes);
+app.use("/api/verify", verificationRoutes);
 
 const server = app.listen(PORT, () => {
   console.log(`TrustAI server is running on port ${PORT}`);

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import Badge from "../components/Badge.jsx";
 import Button from "../components/Button.jsx";
 import Card from "../components/Card.jsx";
@@ -6,6 +7,7 @@ import SectionHeading from "../components/SectionHeading.jsx";
 import { generateContent } from "../services/aiService.js";
 
 function Generate() {
+  const navigate = useNavigate();
   const [prompt, setPrompt] = useState("");
   const [content, setContent] = useState("");
   const [error, setError] = useState("");
@@ -53,6 +55,11 @@ function Generate() {
     await navigator.clipboard?.writeText(content);
   }
 
+  function handleVerifyGeneratedContent() {
+    if (!content) return;
+    navigate("/verify", { state: { content } });
+  }
+
   return (
     <section className="page-shell mx-auto max-w-5xl space-y-8">
       <SectionHeading
@@ -79,8 +86,8 @@ function Generate() {
         </div>
 
         <div className="mt-6 flex flex-col gap-3 sm:flex-row">
-          <Button onClick={handleGenerate} disabled={isLoading}>
-            {isLoading ? "Generating..." : "Generate Content"} <span>→</span>
+            <Button onClick={handleGenerate} disabled={isLoading}>
+            {isLoading ? "Generating with AI..." : "Generate Content"} <span>→</span>
           </Button>
 
           <Button onClick={handleClear} variant="secondary" disabled={isLoading}>
@@ -92,8 +99,8 @@ function Generate() {
           <div className="mt-6 flex items-center gap-3 rounded-2xl border border-cyan-300/20 bg-cyan-300/10 p-4 text-cyan-100">
             <span className="h-5 w-5 animate-spin rounded-full border-2 border-cyan-200/30 border-t-cyan-200" />
             {isTakingLonger
-              ? "Still working... Gemini is taking a little longer than usual."
-              : "AI is generating your content..."}
+              ? "Trying a backup AI model..."
+              : "Generating with AI..."}
           </div>
         )}
 
@@ -134,11 +141,11 @@ function Generate() {
               Verify this content
             </h3>
             <p className="mt-3 leading-7 text-slate-300">
-              Verify this content to calculate its Trust Score and create a
-              blockchain proof when verification is connected.
+              Analyze this content to calculate an explainable Trust Score and
+              review extracted claims.
             </p>
-            <Button to="/verify" className="mt-6 w-full">
-              Verify This Content <span>→</span>
+            <Button onClick={handleVerifyGeneratedContent} className="mt-6 w-full">
+              Analyze Trust <span>→</span>
             </Button>
           </Card>
         </div>
