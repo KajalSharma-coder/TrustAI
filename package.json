@@ -3,13 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "description": "TrustAI - AI Output Verification System",
+  "type": "module",
   "scripts": {
     "client": "npm --prefix client run dev",
     "server": "npm --prefix server run dev",
     "dev": "concurrently -n Backend,Frontend \"npm run dev --prefix server\" \"npm run dev --prefix client\"",
-    "build": "npm --prefix client run build"
+    "build": "npm --prefix client run build",
+    "compile": "hardhat compile"
   },
   "devDependencies": {
-    "concurrently": "^9.1.2"
+    "concurrently": "^9.1.2",
+    "hardhat": "^3.14.0"
   }
 }

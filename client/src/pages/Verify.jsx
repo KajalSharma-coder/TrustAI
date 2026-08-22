@@ -6,7 +6,15 @@ import Card from "../components/Card.jsx";
 import ClaimCard from "../components/ClaimCard.jsx";
 import SectionHeading from "../components/SectionHeading.jsx";
 import TrustScore from "../components/TrustScore.jsx";
+import {
+  storeProofOnBlockchain,
+  verifyProofOnBlockchain,
+} from "../services/blockchainService.js";
 import { analyzeContent } from "../services/verificationService.js";
+import {
+  saveVerificationHistoryItem,
+  updateVerificationHistoryItem,
+} from "../services/verificationHistoryService.js";
 
 const processSteps = [
   "Content",
@@ -24,15 +32,116 @@ const loadingSteps = [
   "Calculating Trust Score...",
 ];
 
+const scoreCategories = [
+  {
+    key: "accuracy",
+    label: "Accuracy",
+    weight: 0.35,
+    description:
+      "Measures how well the content appears to match known facts and avoids unsupported assertions.",
+  },
+  {
+    key: "reliability",
+    label: "Reliability",
+    weight: 0.25,
+    description:
+      "Reflects whether the content is presented consistently and with signals of dependable sourcing or reasoning.",
+  },
+  {
+    key: "consistency",
+    label: "Consistency",
+    weight: 0.2,
+    description:
+      "Checks whether the content avoids internal contradictions or conflicting claims.",
+  },
+  {
+    key: "evidenceQuality",
+    label: "Evidence Quality",
+    weight: 0.2,
+    description:
+      "Assesses whether the claims are backed by useful context, specificity, or supporting evidence.",
+  },
+];
+
 function getClaimStats(claims = []) {
+  const claimItems = Array.isArray(claims) ? claims : [];
+
   return {
-    total: claims.length,
-    supported: claims.filter((claim) => claim.status === "SUPPORTED").length,
-    contradicted: claims.filter((claim) => claim.status === "CONTRADICTED").length,
-    needsVerification: claims.filter(
+    total: claimItems.length,
+    supported: claimItems.filter((claim) => claim.status === "SUPPORTED").length,
+    contradicted: claimItems.filter((claim) => claim.status === "CONTRADICTED").length,
+    needsVerification: claimItems.filter(
       (claim) => claim.status === "NEEDS_VERIFICATION"
     ).length,
   };
+}
+
+function formatProofTimestamp(timestamp) {
+  if (!timestamp) {
+    return "Timestamp unavailable";
+  }
+
+  return new Date(timestamp * 1000).toLocaleString();
+}
+
+function normalizeHash(hash) {
+  if (typeof hash !== "string") {
+    return "";
+  }
+
+  return hash.trim().replace(/^0x/i, "").toLowerCase();
+}
+
+async function generateContentHash(content) {
+  if (!window.crypto?.subtle) {
+    throw new Error("Unable to calculate content hash in this browser.");
+  }
+
+  const encodedContent = new TextEncoder().encode(content);
+  const hashBuffer = await window.crypto.subtle.digest("SHA-256", encodedContent);
+
+  return [...new Uint8Array(hashBuffer)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function getScoreBreakdown(categories = {}) {
+  const categoryValues = categories && typeof categories === "object" ? categories : {};
+
+  return scoreCategories.map((category) => {
+    const value =
+      typeof categoryValues[category.key] === "number"
+        ? categoryValues[category.key]
+        : 0;
+
+    return {
+      ...category,
+      value,
+      contribution: value * category.weight,
+    };
+  });
+}
+
+function formatReportValue(value, fallback = "--") {
+  return value === null || value === undefined || value === "" ? fallback : value;
+}
+
+function getContentIntegrityStatus(integrityCheck, proofError) {
+  if (proofError) return "Verification error";
+  if (integrityCheck?.status === "match") return "Verified";
+  if (integrityCheck?.status === "mismatch") return "Hash mismatch";
+  if (integrityCheck?.status === "missing") return "No proof found";
+  return "Not checked";
+}
+
+function getBlockchainProofStatus(proofResult, integrityCheck, proofError) {
+  if (proofError) return "Verification error";
+  if (integrityCheck?.status === "match" || integrityCheck?.status === "mismatch") {
+    return "Proof found";
+  }
+  if (integrityCheck?.status === "missing") return "No proof found";
+  if (proofResult) return "Proof stored";
+  return "Not checked";
 }
 
 function Verify() {
@@ -40,9 +149,16 @@ function Verify() {
   const [content, setContent] = useState("");
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
+  const [successMessage, setSuccessMessage] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [isStoringProof, setIsStoringProof] = useState(false);
+  const [isVerifyingProof, setIsVerifyingProof] = useState(false);
+  const [proofResult, setProofResult] = useState(null);
+  const [integrityCheck, setIntegrityCheck] = useState(null);
+  const [proofError, setProofError] = useState("");
   const [isTakingLonger, setIsTakingLonger] = useState(false);
   const [isWhyOpen, setIsWhyOpen] = useState(false);
+  const [historyItemId, setHistoryItemId] = useState(null);
 
   useEffect(() => {
     const routedContent = location.state?.content;
@@ -56,12 +172,19 @@ function Verify() {
   }, [location.state]);
 
   async function handleAnalyze() {
+    if (isLoading) return;
+
     const trimmedContent = content.trim();
 
     setError("");
+    setSuccessMessage("");
     setResult(null);
+    setProofResult(null);
+    setIntegrityCheck(null);
+    setProofError("");
     setIsTakingLonger(false);
     setIsWhyOpen(false);
+    setHistoryItemId(null);
 
     if (!trimmedContent) {
       setError("Paste content to analyze first.");
@@ -81,6 +204,9 @@ function Verify() {
       setIsLoading(true);
       const verification = await analyzeContent(trimmedContent);
       setResult(verification);
+      const historyItem = saveVerificationHistoryItem(verification);
+      setHistoryItemId(historyItem.id);
+      setSuccessMessage("Verification completed successfully.");
     } catch (err) {
       setError(err.message || "Unable to analyze this content. Please try again.");
     } finally {
@@ -94,16 +220,160 @@ function Verify() {
     setContent("");
     setResult(null);
     setError("");
+    setSuccessMessage("");
+    setProofResult(null);
+    setIntegrityCheck(null);
+    setProofError("");
     setIsTakingLonger(false);
     setIsWhyOpen(false);
+    setHistoryItemId(null);
   }
 
   async function handleCopyHash() {
     if (!result?.contentHash) return;
-    await navigator.clipboard?.writeText(result.contentHash);
+
+    try {
+      await navigator.clipboard?.writeText(result.contentHash);
+      setSuccessMessage("Content hash copied.");
+    } catch {
+      setProofError("Unable to copy content hash.");
+    }
+  }
+
+  async function handleStoreProof() {
+    if (isStoringProof || isVerifyingProof) return;
+    if (!result?.contentHash) return;
+
+    setProofError("");
+    setSuccessMessage("");
+    setIntegrityCheck(null);
+
+    try {
+      setIsStoringProof(true);
+      const proof = await storeProofOnBlockchain(result.contentHash);
+      setProofResult(proof);
+      updateVerificationHistoryItem(historyItemId, {
+        blockchainStatus: "Proof stored",
+        blockchainProof: proof,
+      });
+      setSuccessMessage("Blockchain proof stored successfully.");
+    } catch (err) {
+      setProofError(
+        err.message || "Unable to store proof on blockchain. Please try again."
+      );
+    } finally {
+      setIsStoringProof(false);
+    }
+  }
+
+  async function handleVerifyProof() {
+    if (isVerifyingProof || isStoringProof) return;
+    if (!result?.contentHash) return;
+
+    setProofError("");
+    setSuccessMessage("");
+    setIntegrityCheck(null);
+
+    try {
+      setIsVerifyingProof(true);
+      const currentHash = await generateContentHash(content.trim());
+      const storedHash = proofResult?.contentHash || result.contentHash;
+      const storedProofExists = await verifyProofOnBlockchain(storedHash);
+
+      if (!storedProofExists) {
+        updateVerificationHistoryItem(historyItemId, {
+          blockchainStatus: "No proof found",
+          integrityCheck: {
+            status: "missing",
+            currentHash,
+            storedHash,
+          },
+        });
+        setIntegrityCheck({
+          status: "missing",
+          currentHash,
+          storedHash,
+        });
+        setSuccessMessage("Blockchain verification completed.");
+        return;
+      }
+
+      const hashesMatch = normalizeHash(currentHash) === normalizeHash(storedHash);
+
+      updateVerificationHistoryItem(historyItemId, {
+        blockchainStatus: hashesMatch ? "Verified" : "Hash mismatch",
+        integrityCheck: {
+          status: hashesMatch ? "match" : "mismatch",
+          currentHash,
+          storedHash,
+        },
+      });
+      setIntegrityCheck({
+        status: hashesMatch ? "match" : "mismatch",
+        currentHash,
+        storedHash,
+      });
+      setSuccessMessage("Blockchain verification completed.");
+    } catch (err) {
+      setProofError(
+        err.message || "Unable to verify blockchain proof. Please try again."
+      );
+    } finally {
+      setIsVerifyingProof(false);
+    }
   }
 
   const claimStats = getClaimStats(result?.claims);
+  const extractedClaims = Array.isArray(result?.claims) ? result.claims : [];
+  const scoreBreakdown = getScoreBreakdown(result?.categories);
+  const calculatedTrustScore = Math.round(
+    scoreBreakdown.reduce((total, item) => total + item.contribution, 0)
+  );
+  const reportItems = [
+    {
+      label: "Trust Score",
+      value:
+        typeof result?.trustScore === "number" ? result.trustScore : undefined,
+    },
+    { label: "Risk Level", value: result?.riskLevel },
+    {
+      label: "Accuracy",
+      value:
+        typeof result?.categories?.accuracy === "number"
+          ? result.categories.accuracy
+          : undefined,
+    },
+    {
+      label: "Reliability",
+      value:
+        typeof result?.categories?.reliability === "number"
+          ? result.categories.reliability
+          : undefined,
+    },
+    {
+      label: "Consistency",
+      value:
+        typeof result?.categories?.consistency === "number"
+          ? result.categories.consistency
+          : undefined,
+    },
+    {
+      label: "Evidence Quality",
+      value:
+        typeof result?.categories?.evidenceQuality === "number"
+          ? result.categories.evidenceQuality
+          : undefined,
+    },
+    {
+      label: "Content Integrity",
+      value: getContentIntegrityStatus(integrityCheck, proofError),
+    },
+    {
+      label: "Blockchain Proof",
+      value: getBlockchainProofStatus(proofResult, integrityCheck, proofError),
+    },
+    { label: "Extracted Claims", value: claimStats.total },
+  ];
 
   return (
     <section className="page-shell mx-auto max-w-6xl space-y-8">
@@ -173,6 +443,12 @@ function Verify() {
               {error}
             </div>
           )}
+
+          {successMessage && !error && (
+            <div className="mt-6 rounded-2xl border border-emerald-300/25 bg-emerald-300/10 p-4 text-emerald-50">
+              {successMessage}
+            </div>
+          )}
         </Card>
 
         <Card>
@@ -206,6 +482,35 @@ function Verify() {
             categories={result.categories}
           />
 
+          <Card>
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+              <div>
+                <Badge>Verification Report</Badge>
+                <h2 className="mt-3 text-2xl font-semibold text-white">
+                  Verification Report
+                </h2>
+              </div>
+              <p className="text-sm text-slate-400">
+                Compact summary of the current verification result.
+              </p>
+            </div>
+            <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {reportItems.map((item) => (
+                <div
+                  key={item.label}
+                  className="rounded-2xl border border-white/10 bg-white/[0.04] p-4"
+                >
+                  <p className="text-xs uppercase tracking-wide text-slate-500">
+                    {item.label}
+                  </p>
+                  <p className="mt-2 text-lg font-semibold text-white">
+                    {formatReportValue(item.value)}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </Card>
+
           {result.contentHash && (
             <Card>
               <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
@@ -215,7 +520,11 @@ function Verify() {
                     Content Integrity Hash
                   </h2>
                 </div>
-                <Button variant="secondary" onClick={handleCopyHash}>
+                <Button
+                  variant="secondary"
+                  onClick={handleCopyHash}
+                  disabled={isStoringProof || isVerifyingProof}
+                >
                   Copy Hash
                 </Button>
               </div>
@@ -226,6 +535,84 @@ function Verify() {
                 This SHA-256 fingerprint uniquely represents the analyzed content.
                 If the content changes, the fingerprint changes.
               </p>
+              <div className="mt-5 flex flex-col gap-3 sm:flex-row">
+                <Button
+                  onClick={handleStoreProof}
+                  disabled={isStoringProof || isVerifyingProof || Boolean(proofResult)}
+                >
+                  {isStoringProof
+                    ? "Storing Proof..."
+                    : "Store Proof on Blockchain"}
+                </Button>
+                <Button
+                  variant="secondary"
+                  onClick={handleVerifyProof}
+                  disabled={isVerifyingProof || isStoringProof}
+                >
+                  {isVerifyingProof
+                    ? "Verifying Proof..."
+                    : "Verify Blockchain Proof"}
+                </Button>
+              </div>
+              {integrityCheck?.status === "match" && (
+                <div
+                  className="mt-5 rounded-2xl border border-emerald-300/25 bg-emerald-300/10 p-4 text-emerald-50"
+                >
+                  <p className="font-semibold">✓ Content Integrity Verified</p>
+                  <p className="mt-1 text-sm">No changes detected</p>
+                </div>
+              )}
+              {integrityCheck?.status === "mismatch" && (
+                <div className="mt-5 rounded-2xl border border-amber-300/25 bg-amber-300/10 p-4 text-amber-50">
+                  <p className="font-semibold">⚠ Content May Have Been Tampered</p>
+                  <p className="mt-1 text-sm">Hash mismatch detected</p>
+                  <div className="mt-4 space-y-3 text-sm">
+                    <div>
+                      <p className="text-amber-100/80">Original/stored hash:</p>
+                      <p className="mt-1 break-all font-mono text-white">
+                        {integrityCheck.storedHash}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-amber-100/80">Current hash:</p>
+                      <p className="mt-1 break-all font-mono text-white">
+                        {integrityCheck.currentHash}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+              {integrityCheck?.status === "missing" && (
+                <div className="mt-5 rounded-2xl border border-amber-300/25 bg-amber-300/10 p-4 text-amber-50">
+                  ⚠ No matching blockchain proof found
+                </div>
+              )}
+              {proofResult && (
+                <div className="mt-5 rounded-2xl border border-emerald-300/25 bg-emerald-300/10 p-4 text-emerald-50">
+                  <p className="font-semibold">✓ Proof Stored on Blockchain</p>
+                  <div className="mt-3 space-y-2 text-sm">
+                    <p>
+                      <span className="text-emerald-100/80">
+                        Transaction Hash:
+                      </span>{" "}
+                      <span className="font-mono break-all text-white">
+                        {proofResult.transactionHash}
+                      </span>
+                    </p>
+                    <p>
+                      <span className="text-emerald-100/80">Timestamp:</span>{" "}
+                      <span className="text-white">
+                        {formatProofTimestamp(proofResult.timestamp)}
+                      </span>
+                    </p>
+                  </div>
+                </div>
+              )}
+              {proofError && (
+                <div className="mt-5 rounded-2xl border border-red-500/30 bg-red-400/10 p-4 text-red-100">
+                  {proofError}
+                </div>
+              )}
             </Card>
           )}
 
@@ -276,6 +663,64 @@ function Verify() {
                     </p>
                   </div>
                 </div>
+                <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-5">
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+                    <div>
+                      <h3 className="text-lg font-semibold text-white">
+                        Score Breakdown
+                      </h3>
+                      <p className="mt-1 text-sm leading-6 text-slate-400">
+                        The final Trust Score is a weighted average of the four
+                        category scores returned by the analysis.
+                      </p>
+                    </div>
+                    <div className="text-left sm:text-right">
+                      <p className="text-xs uppercase tracking-wide text-slate-500">
+                        Final Trust Score
+                      </p>
+                      <p className="text-2xl font-bold text-white">
+                        {result.trustScore}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="mt-5 space-y-3">
+                    {scoreBreakdown.map((item) => (
+                      <div
+                        key={item.key}
+                        className="rounded-2xl border border-white/10 bg-slate-950/30 p-4"
+                      >
+                        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                          <div>
+                            <p className="font-semibold text-white">
+                              {item.label}: {item.value}
+                            </p>
+                            <p className="mt-1 text-sm leading-6 text-slate-400">
+                              {item.description}
+                            </p>
+                          </div>
+                          <span className="rounded-full border border-cyan-300/30 bg-cyan-300/10 px-3 py-1 text-xs font-bold text-cyan-100">
+                            {Math.round(item.weight * 100)}% weight
+                          </span>
+                        </div>
+                        <p className="mt-3 text-sm text-slate-300">
+                          {item.value} x {Math.round(item.weight * 100)}% ={" "}
+                          {item.contribution.toFixed(1)} points
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="mt-5 rounded-2xl border border-cyan-300/20 bg-cyan-300/10 p-4 text-sm leading-6 text-cyan-50">
+                    ({scoreBreakdown
+                      .map(
+                        (item) =>
+                          `${item.value} x ${Math.round(item.weight * 100)}%`
+                      )
+                      .join(" + ")}
+                    ) = {calculatedTrustScore}
+                  </div>
+                </div>
               </div>
             )}
           </Card>
@@ -283,8 +728,8 @@ function Verify() {
           <Card>
             <Badge>Extracted Claims</Badge>
             <div className="mt-5 space-y-4">
-              {result.claims.length ? (
-                result.claims.map((claim, index) => (
+              {extractedClaims.length ? (
+                extractedClaims.map((claim, index) => (
                   <ClaimCard key={`${claim.claim}-${index}`} claim={claim} />
                 ))
               ) : (

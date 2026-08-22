@@ -11,13 +11,17 @@ function Generate() {
   const [prompt, setPrompt] = useState("");
   const [content, setContent] = useState("");
   const [error, setError] = useState("");
+  const [successMessage, setSuccessMessage] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [isTakingLonger, setIsTakingLonger] = useState(false);
 
   async function handleGenerate() {
+    if (isLoading) return;
+
     const trimmedPrompt = prompt.trim();
 
     setError("");
+    setSuccessMessage("");
     setContent("");
     setIsTakingLonger(false);
 
@@ -34,8 +38,9 @@ function Generate() {
       setIsLoading(true);
       const generatedContent = await generateContent(trimmedPrompt);
       setContent(generatedContent);
+      setSuccessMessage("Content generated successfully.");
     } catch (err) {
-      setError("AI service is temporarily busy. Please try again.");
+      setError(err.message || "AI service is temporarily busy. Please try again.");
     } finally {
       clearTimeout(slowTimer);
       setIsLoading(false);
@@ -47,16 +52,23 @@ function Generate() {
     setPrompt("");
     setContent("");
     setError("");
+    setSuccessMessage("");
     setIsTakingLonger(false);
   }
 
   async function handleCopy() {
     if (!content) return;
-    await navigator.clipboard?.writeText(content);
+
+    try {
+      await navigator.clipboard?.writeText(content);
+      setSuccessMessage("Generated content copied.");
+    } catch {
+      setError("Unable to copy generated content.");
+    }
   }
 
   function handleVerifyGeneratedContent() {
-    if (!content) return;
+    if (!content || isLoading) return;
     navigate("/verify", { state: { content } });
   }
 
@@ -86,7 +98,7 @@ function Generate() {
         </div>
 
         <div className="mt-6 flex flex-col gap-3 sm:flex-row">
-            <Button onClick={handleGenerate} disabled={isLoading}>
+          <Button onClick={handleGenerate} disabled={isLoading}>
             {isLoading ? "Generating with AI..." : "Generate Content"} <span>→</span>
           </Button>
 
@@ -109,6 +121,12 @@ function Generate() {
             {error}
           </div>
         )}
+
+        {successMessage && !error && (
+          <div className="mt-6 rounded-2xl border border-emerald-300/25 bg-emerald-300/10 p-4 text-emerald-50">
+            {successMessage}
+          </div>
+        )}
       </Card>
 
       {content && (
@@ -122,7 +140,7 @@ function Generate() {
                 </h2>
               </div>
               <div className="flex gap-3">
-                <Button variant="secondary" onClick={handleCopy}>
+                <Button variant="secondary" onClick={handleCopy} disabled={isLoading}>
                   Copy
                 </Button>
                 <Button variant="secondary" onClick={handleGenerate} disabled={isLoading}>
@@ -144,7 +162,11 @@ function Generate() {
               Analyze this content to calculate an explainable Trust Score and
               review extracted claims.
             </p>
-            <Button onClick={handleVerifyGeneratedContent} className="mt-6 w-full">
+            <Button
+              onClick={handleVerifyGeneratedContent}
+              className="mt-6 w-full"
+              disabled={isLoading}
+            >
               Analyze Trust <span>→</span>
             </Button>
           </Card>
