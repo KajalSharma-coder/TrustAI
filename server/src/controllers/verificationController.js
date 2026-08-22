@@ -1,4 +1,5 @@
 import { analyzeContent } from "../services/verificationService.js";
+import { generateContentHash } from "../utils/hash.js";
 
 export async function analyzeVerificationContent(req, res) {
   const requestStartedAt = Date.now();
@@ -21,6 +22,7 @@ export async function analyzeVerificationContent(req, res) {
   }
 
   try {
+    const contentHash = generateContentHash(trimmedContent);
     const verification = await analyzeContent(trimmedContent);
     const elapsedMs = Date.now() - requestStartedAt;
 
@@ -28,7 +30,10 @@ export async function analyzeVerificationContent(req, res) {
 
     return res.json({
       success: true,
-      verification,
+      verification: {
+        ...verification,
+        contentHash,
+      },
     });
   } catch (error) {
     console.error("Verification analysis failed:", error.message);

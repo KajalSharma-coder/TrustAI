@@ -10,6 +10,7 @@ import { analyzeContent } from "../services/verificationService.js";
 
 const processSteps = [
   "Content",
+  "Content Integrity",
   "Claim Extraction",
   "Risk Analysis",
   "Category Scores",
@@ -95,6 +96,11 @@ function Verify() {
     setError("");
     setIsTakingLonger(false);
     setIsWhyOpen(false);
+  }
+
+  async function handleCopyHash() {
+    if (!result?.contentHash) return;
+    await navigator.clipboard?.writeText(result.contentHash);
   }
 
   const claimStats = getClaimStats(result?.claims);
@@ -199,6 +205,29 @@ function Verify() {
             summary={result.summary}
             categories={result.categories}
           />
+
+          {result.contentHash && (
+            <Card>
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <Badge>Content Integrity</Badge>
+                  <h2 className="mt-3 text-2xl font-semibold text-white">
+                    Content Integrity Hash
+                  </h2>
+                </div>
+                <Button variant="secondary" onClick={handleCopyHash}>
+                  Copy Hash
+                </Button>
+              </div>
+              <div className="mt-5 overflow-x-auto rounded-2xl border border-cyan-300/20 bg-slate-950/50 p-4 font-mono text-sm leading-6 text-cyan-100">
+                {result.contentHash}
+              </div>
+              <p className="mt-4 text-sm leading-6 text-slate-400">
+                This SHA-256 fingerprint uniquely represents the analyzed content.
+                If the content changes, the fingerprint changes.
+              </p>
+            </Card>
+          )}
 
           <Card>
             <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
