@@ -2,6 +2,10 @@
 .env.*
 !.env.example
 server/.env
+*.key
+*.pem
+*.p12
+*.pfx
 node_modules/
 dist/
 build/

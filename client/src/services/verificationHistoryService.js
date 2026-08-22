@@ -1,6 +1,7 @@
 import { postJson } from "./apiClient.js";
 
 const HISTORY_STORAGE_KEY = "trustai:verification-history";
+const ACTIVE_BLOCKCHAIN_PROOF_KEY = "trustai:active-blockchain-proof";
 const MAX_HISTORY_ITEMS = 12;
 
 function readHistory() {
@@ -28,6 +29,41 @@ function writeHistory(history) {
 
 export function getVerificationHistory() {
   return readHistory();
+}
+
+export function getActiveBlockchainProof() {
+  try {
+    const proof = JSON.parse(
+      window.localStorage.getItem(ACTIVE_BLOCKCHAIN_PROOF_KEY) || "null"
+    );
+
+    return proof && typeof proof === "object" ? proof : null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveActiveBlockchainProof(proof) {
+  if (!proof?.contentHash) {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(
+      ACTIVE_BLOCKCHAIN_PROOF_KEY,
+      JSON.stringify(proof)
+    );
+  } catch {
+    // Verification history still works if browser storage is unavailable.
+  }
+}
+
+export function clearActiveBlockchainProof() {
+  try {
+    window.localStorage.removeItem(ACTIVE_BLOCKCHAIN_PROOF_KEY);
+  } catch {
+    // Nothing to clear if browser storage is unavailable.
+  }
 }
 
 export function saveVerificationHistoryItem(verification) {

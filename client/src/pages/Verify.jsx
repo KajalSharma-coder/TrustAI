@@ -12,9 +12,16 @@ import {
 } from "../services/blockchainService.js";
 import { analyzeContent } from "../services/verificationService.js";
 import {
+  clearActiveBlockchainProof,
+  getActiveBlockchainProof,
   saveVerificationHistoryItem,
+  saveActiveBlockchainProof,
   updateVerificationHistoryItem,
 } from "../services/verificationHistoryService.js";
+import {
+  createIntegrityCheck,
+  normalizeHash,
+} from "../utils/integrity.js";
 
 const processSteps = [
   "Content",
@@ -84,14 +91,6 @@ function formatProofTimestamp(timestamp) {
   return new Date(timestamp * 1000).toLocaleString();
 }
 
-function normalizeHash(hash) {
-  if (typeof hash !== "string") {
-    return "";
-  }
-
-  return hash.trim().replace(/^0x/i, "").toLowerCase();
-}
-
 async function generateContentHash(content) {
   if (!window.crypto?.subtle) {
     throw new Error("Unable to calculate content hash in this browser.");
@@ -130,6 +129,9 @@ function getContentIntegrityStatus(integrityCheck, proofError) {
   if (proofError) return "Verification error";
   if (integrityCheck?.status === "match") return "Verified";
   if (integrityCheck?.status === "mismatch") return "Hash mismatch";
+  if (integrityCheck?.status === "missing" && integrityCheck?.tampered) {
+    return "Tampered";
+  }
   if (integrityCheck?.status === "missing") return "No proof found";
   return "Not checked";
 }
@@ -138,6 +140,9 @@ function getBlockchainProofStatus(proofResult, integrityCheck, proofError) {
   if (proofError) return "Verification error";
   if (integrityCheck?.status === "match" || integrityCheck?.status === "mismatch") {
     return "Proof found";
+  }
+  if (integrityCheck?.status === "missing" && integrityCheck?.tampered) {
+    return "No matching proof";
   }
   if (integrityCheck?.status === "missing") return "No proof found";
   if (proofResult) return "Proof stored";
@@ -159,6 +164,7 @@ function Verify() {
   const [isTakingLonger, setIsTakingLonger] = useState(false);
   const [isWhyOpen, setIsWhyOpen] = useState(false);
   const [historyItemId, setHistoryItemId] = useState(null);
+  const [previousProofResult, setPreviousProofResult] = useState(null);
 
   useEffect(() => {
     const routedContent = location.state?.content;
@@ -227,6 +233,8 @@ function Verify() {
     setIsTakingLonger(false);
     setIsWhyOpen(false);
     setHistoryItemId(null);
+    setPreviousProofResult(null);
+    clearActiveBlockchainProof();
   }
 
   async function handleCopyHash() {
@@ -252,6 +260,8 @@ function Verify() {
       setIsStoringProof(true);
       const proof = await storeProofOnBlockchain(result.contentHash);
       setProofResult(proof);
+      setPreviousProofResult(proof);
+      saveActiveBlockchainProof(proof);
       updateVerificationHistoryItem(historyItemId, {
         blockchainStatus: "Proof stored",
         blockchainProof: proof,
@@ -277,42 +287,41 @@ function Verify() {
     try {
       setIsVerifyingProof(true);
       const currentHash = await generateContentHash(content.trim());
-      const storedHash = proofResult?.contentHash || result.contentHash;
-      const storedProofExists = await verifyProofOnBlockchain(storedHash);
+      const activeProof = previousProofResult || getActiveBlockchainProof();
+      const originalHash = activeProof?.contentHash;
+      const blockchainResult = await verifyProofOnBlockchain(
+        currentHash,
+        originalHash
+      );
+      const integrityResult = blockchainResult?.integrity || {};
+      const integrityCheckResult = createIntegrityCheck({
+        currentHash,
+        originalHash: integrityResult.originalHash || originalHash,
+        checkedHash: currentHash,
+        proofExists: blockchainResult.exists,
+      });
 
-      if (!storedProofExists) {
+      if (!blockchainResult.exists) {
+        const blockchainStatus = integrityCheckResult.tampered
+          ? "No matching proof"
+          : "No proof found";
+
         updateVerificationHistoryItem(historyItemId, {
-          blockchainStatus: "No proof found",
-          integrityCheck: {
-            status: "missing",
-            currentHash,
-            storedHash,
-          },
+          blockchainStatus,
+          integrityCheck: integrityCheckResult,
         });
-        setIntegrityCheck({
-          status: "missing",
-          currentHash,
-          storedHash,
-        });
+        setIntegrityCheck(integrityCheckResult);
         setSuccessMessage("Blockchain verification completed.");
         return;
       }
 
-      const hashesMatch = normalizeHash(currentHash) === normalizeHash(storedHash);
-
       updateVerificationHistoryItem(historyItemId, {
-        blockchainStatus: hashesMatch ? "Verified" : "Hash mismatch",
-        integrityCheck: {
-          status: hashesMatch ? "match" : "mismatch",
-          currentHash,
-          storedHash,
-        },
+        blockchainStatus: integrityCheckResult.tampered
+          ? "Hash mismatch"
+          : "Verified",
+        integrityCheck: integrityCheckResult,
       });
-      setIntegrityCheck({
-        status: hashesMatch ? "match" : "mismatch",
-        currentHash,
-        storedHash,
-      });
+      setIntegrityCheck(integrityCheckResult);
       setSuccessMessage("Blockchain verification completed.");
     } catch (err) {
       setProofError(
@@ -584,7 +593,34 @@ function Verify() {
               )}
               {integrityCheck?.status === "missing" && (
                 <div className="mt-5 rounded-2xl border border-amber-300/25 bg-amber-300/10 p-4 text-amber-50">
-                  ⚠ No matching blockchain proof found
+                  {integrityCheck.tampered ? (
+                    <>
+                      <p className="font-semibold">
+                        ⚠ Content May Have Been Tampered
+                      </p>
+                      <p className="mt-1 text-sm">
+                        No matching blockchain proof found for the current hash.
+                      </p>
+                      <div className="mt-4 space-y-3 text-sm">
+                        <div>
+                          <p className="text-amber-100/80">
+                            Original/stored hash:
+                          </p>
+                          <p className="mt-1 break-all font-mono text-white">
+                            {integrityCheck.storedHash}
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-amber-100/80">Current hash:</p>
+                          <p className="mt-1 break-all font-mono text-white">
+                            {integrityCheck.currentHash}
+                          </p>
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    "⚠ No matching blockchain proof found"
+                  )}
                 </div>
               )}
               {proofResult && (

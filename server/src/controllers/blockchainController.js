@@ -1,4 +1,5 @@
 import { storeProof, verifyProof } from "../services/blockchainService.js";
+import { createIntegrityResult } from "../utils/integrity.js";
 
 function logBlockchainError(action, error) {
   console.error(`[Blockchain] ${action} failed`, {
@@ -36,7 +37,7 @@ export async function storeBlockchainProof(req, res) {
 }
 
 export async function verifyBlockchainProof(req, res) {
-  const { contentHash } = req.body;
+  const { contentHash, originalHash } = req.body;
 
   if (!contentHash || typeof contentHash !== "string") {
     return res.status(400).json({
@@ -51,6 +52,7 @@ export async function verifyBlockchainProof(req, res) {
     return res.json({
       success: true,
       exists,
+      integrity: createIntegrityResult(contentHash, originalHash),
     });
   } catch (error) {
     logBlockchainError("Proof verification", error);

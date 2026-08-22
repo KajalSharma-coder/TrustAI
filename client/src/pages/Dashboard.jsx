@@ -1,9 +1,16 @@
 import { useEffect, useState } from "react";
 import Badge from "../components/Badge.jsx";
+import Button from "../components/Button.jsx";
 import Card from "../components/Card.jsx";
 import SectionHeading from "../components/SectionHeading.jsx";
 import TrustScore from "../components/TrustScore.jsx";
 import { getDashboardHistory } from "../services/dashboardService.js";
+import {
+  isTamperedIntegrityCheck,
+  normalizeHash,
+} from "../utils/integrity.js";
+
+const RECENT_VERIFICATION_LIMIT = 3;
 
 function formatTimestamp(timestamp) {
   if (!timestamp) {
@@ -29,34 +36,21 @@ function hasSuccessfulBlockchainProof(item) {
   return ["Proof stored", "Verified"].includes(item?.blockchainStatus);
 }
 
-function normalizeHash(hash) {
-  if (typeof hash !== "string") {
-    return "";
-  }
-
-  return hash.trim().replace(/^0x/i, "").toLowerCase();
-}
-
 function hasIntegrityVerificationData(item) {
   const integrityCheck = item?.integrityCheck;
 
   return Boolean(
     integrityCheck &&
-      (integrityCheck.status === "match" || integrityCheck.status === "mismatch") &&
+      (integrityCheck.status === "match" ||
+        integrityCheck.status === "mismatch" ||
+        integrityCheck.tampered === true) &&
       normalizeHash(integrityCheck.currentHash) &&
       normalizeHash(integrityCheck.storedHash)
   );
 }
 
 function hasTamperedContent(item) {
-  if (!hasIntegrityVerificationData(item)) {
-    return false;
-  }
-
-  return (
-    normalizeHash(item.integrityCheck.currentHash) !==
-    normalizeHash(item.integrityCheck.storedHash)
-  );
+  return isTamperedIntegrityCheck(item?.integrityCheck);
 }
 
 function getTamperedContentDetail(integrityVerificationCount, tamperedContentCount) {
@@ -69,9 +63,11 @@ function getTamperedContentDetail(integrityVerificationCount, tamperedContentCou
     : "No hash mismatches detected";
 }
 
-function getIntegrityStatus(blockchainStatus) {
+function getIntegrityStatus(blockchainStatus, integrityCheck) {
+  if (integrityCheck?.tampered === true) return "Tampered";
   if (blockchainStatus === "Verified") return "Verified";
   if (blockchainStatus === "Hash mismatch") return "Tampered";
+  if (blockchainStatus === "No matching proof") return "Tampered";
   if (blockchainStatus === "No proof found") return "No proof found";
   if (blockchainStatus === "Proof stored") return "Proof stored";
   return "Not checked";
@@ -100,6 +96,7 @@ function getDashboardCategories(verification) {
 
 function Dashboard() {
   const [verificationHistory, setVerificationHistory] = useState([]);
+  const [isRecentHistoryExpanded, setIsRecentHistoryExpanded] = useState(false);
 
   useEffect(() => {
     let isMounted = true;
@@ -128,6 +125,11 @@ function Dashboard() {
     hasIntegrityVerificationData
   ).length;
   const tamperedContentCount = verificationHistory.filter(hasTamperedContent).length;
+  const hasMoreRecentVerifications =
+    verificationHistory.length > RECENT_VERIFICATION_LIMIT;
+  const visibleVerificationHistory = isRecentHistoryExpanded
+    ? verificationHistory
+    : verificationHistory.slice(0, RECENT_VERIFICATION_LIMIT);
   const hasVerificationData = Boolean(latestVerification);
   const verificationStatusItems = [
     {
@@ -144,7 +146,10 @@ function Dashboard() {
     },
     {
       label: "Integrity Check",
-      value: getIntegrityStatus(latestVerification?.blockchainStatus),
+      value: getIntegrityStatus(
+        latestVerification?.blockchainStatus,
+        latestVerification?.integrityCheck
+      ),
     },
   ];
   const hasBlockchainActivity =
@@ -237,48 +242,61 @@ function Dashboard() {
         <Card>
           <Badge>Recent Verifications</Badge>
           {verificationHistory.length ? (
-            <div className="mt-6 space-y-3">
-              {verificationHistory.map((item) => (
-                <div
-                  key={item.id}
-                  className="rounded-2xl border border-white/10 bg-white/[0.04] p-4"
+            <>
+              <div className="mt-6 space-y-3 transition-all duration-300">
+                {visibleVerificationHistory.map((item) => (
+                  <div
+                    key={item.id}
+                    className="rounded-2xl border border-white/10 bg-white/[0.04] p-4 transition duration-300"
+                  >
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                      <div>
+                        <p className="text-sm font-semibold text-white">
+                          {item.verificationStatus || "Completed"}
+                        </p>
+                        <p className="mt-1 text-xs text-slate-500">
+                          {formatTimestamp(item.timestamp)}
+                        </p>
+                      </div>
+                      <span className="rounded-full border border-cyan-300/30 bg-cyan-300/10 px-3 py-1 text-xs font-bold text-cyan-100">
+                        {typeof item.trustScore === "number"
+                          ? `${item.trustScore} Trust Score`
+                          : "-- Trust Score"}
+                      </span>
+                    </div>
+                    <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                      <div>
+                        <p className="text-xs uppercase tracking-wide text-slate-500">
+                          Verification Status
+                        </p>
+                        <p className="mt-1 text-sm font-medium text-slate-200">
+                          {item.riskLevel ? `${item.riskLevel} risk` : "Completed"}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-xs uppercase tracking-wide text-slate-500">
+                          Blockchain Status
+                        </p>
+                        <p className="mt-1 text-sm font-medium text-slate-200">
+                          {item.blockchainStatus || "Not checked"}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              {hasMoreRecentVerifications && (
+                <Button
+                  variant="secondary"
+                  className="mt-5 w-full justify-center"
+                  onClick={() =>
+                    setIsRecentHistoryExpanded((isExpanded) => !isExpanded)
+                  }
                 >
-                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                    <div>
-                      <p className="text-sm font-semibold text-white">
-                        {item.verificationStatus || "Completed"}
-                      </p>
-                      <p className="mt-1 text-xs text-slate-500">
-                        {formatTimestamp(item.timestamp)}
-                      </p>
-                    </div>
-                    <span className="rounded-full border border-cyan-300/30 bg-cyan-300/10 px-3 py-1 text-xs font-bold text-cyan-100">
-                      {typeof item.trustScore === "number"
-                        ? `${item.trustScore} Trust Score`
-                        : "-- Trust Score"}
-                    </span>
-                  </div>
-                  <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                    <div>
-                      <p className="text-xs uppercase tracking-wide text-slate-500">
-                        Verification Status
-                      </p>
-                      <p className="mt-1 text-sm font-medium text-slate-200">
-                        {item.riskLevel ? `${item.riskLevel} risk` : "Completed"}
-                      </p>
-                    </div>
-                    <div>
-                      <p className="text-xs uppercase tracking-wide text-slate-500">
-                        Blockchain Status
-                      </p>
-                      <p className="mt-1 text-sm font-medium text-slate-200">
-                        {item.blockchainStatus || "Not checked"}
-                      </p>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
+                  {isRecentHistoryExpanded ? "Show Less" : "Show More"}
+                </Button>
+              )}
+            </>
           ) : (
             <div className="mt-6 rounded-2xl border border-dashed border-white/10 bg-slate-950/40 p-8 text-center">
               <p className="text-lg font-semibold text-white">

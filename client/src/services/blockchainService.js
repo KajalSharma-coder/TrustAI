@@ -10,12 +10,15 @@ export async function storeProofOnBlockchain(contentHash) {
   return data.proof;
 }
 
-export async function verifyProofOnBlockchain(contentHash) {
-  const data = await postJson("/api/blockchain/verify-proof", { contentHash });
+export async function verifyProofOnBlockchain(contentHash, originalHash) {
+  const data = await postJson("/api/blockchain/verify-proof", {
+    contentHash,
+    originalHash,
+  });
 
   if (typeof data?.exists !== "boolean") {
     throw new Error("Unable to verify blockchain proof. Please try again.");
   }
 
-  return data.exists;
+  return data;
 }
