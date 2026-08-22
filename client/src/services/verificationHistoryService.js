@@ -79,6 +79,7 @@ export function saveVerificationHistoryItem(verification) {
     claimsCount: Array.isArray(verification.claims) ? verification.claims.length : 0,
     blockchainStatus: "Not checked",
     timestamp,
+    updatedAt: timestamp,
   };
   const history = readHistory().filter((item) => item.id !== historyItem.id);
 
@@ -92,8 +93,9 @@ export function updateVerificationHistoryItem(id, updates) {
   if (!id) return;
 
   const history = readHistory();
+  const updatedAt = new Date().toISOString();
   const updatedHistory = history.map((item) =>
-    item.id === id ? { ...item, ...updates } : item
+    item.id === id ? { ...item, ...updates, updatedAt } : item
   );
   const updatedItem = updatedHistory.find((item) => item.id === id);
 

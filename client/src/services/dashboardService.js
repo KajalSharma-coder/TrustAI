@@ -4,7 +4,11 @@ import { getVerificationHistory } from "./verificationHistoryService.js";
 function mergeHistory(primaryHistory, fallbackHistory) {
   const mergedById = new Map();
 
-  [...primaryHistory, ...fallbackHistory].forEach((item) => {
+  // Local history is the freshest source because blockchain/integrity updates
+  // are written locally first and the backend persistence call is asynchronous.
+  // Process backend first so a stale backend record cannot overwrite a newer
+  // local integrity/tamper result.
+  [...fallbackHistory, ...primaryHistory].forEach((item) => {
     if (!item?.id) {
       return;
     }
