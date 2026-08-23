@@ -426,12 +426,13 @@ function Verify() {
       const nft = await mintContentAsNFT(verifiedContentHash);
       setNftResult(nft);
       setNftTokenId(nft.tokenId);
-      setNftVerificationResult(nft);
+      setNftVerificationResult(null);
+      setNftVerificationError("");
       setSuccessMessage("NFT minted successfully.");
     } catch (err) {
       if (err.nft) {
-        setNftVerificationResult(err.nft);
         setNftTokenId(err.nft.tokenId || "");
+        setNftVerificationResult(null);
       }
 
       setNftError(err.message || "Unable to mint NFT. Please try again.");
@@ -890,7 +891,11 @@ function Verify() {
                 <div className="mt-4 flex flex-col gap-3 sm:flex-row">
                   <input
                     value={nftTokenId}
-                    onChange={(event) => setNftTokenId(event.target.value)}
+                    onChange={(event) => {
+                      setNftTokenId(event.target.value);
+                      setNftVerificationResult(null);
+                      setNftVerificationError("");
+                    }}
                     className="input-glass"
                     inputMode="numeric"
                     placeholder="Enter NFT Token ID"

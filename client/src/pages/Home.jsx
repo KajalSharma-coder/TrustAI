@@ -14,16 +14,86 @@ const reasons = [
   {
     title: "AI Analysis",
     text: "Analyze generated content for quality and reliability.",
+    icon: "analysis",
   },
   {
     title: "Tamper Detection",
     text: "Detect whether verified content has been modified.",
+    icon: "tamper",
   },
   {
     title: "Blockchain Proof",
     text: "Create an immutable proof of the original content.",
+    icon: "blockchain",
   },
 ];
+
+function ReasonIcon({ type }) {
+  const iconClassName = "h-7 w-7 text-cyan-100";
+
+  if (type === "tamper") {
+    return (
+      <svg
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        className={iconClassName}
+        aria-hidden="true"
+      >
+        <path d="M12 3 5 6v5c0 4.6 2.9 7.9 7 10 4.1-2.1 7-5.4 7-10V6l-7-3Z" />
+        <path d="M9 12h6" />
+        <path d="m10 9 4 6" />
+        <path d="m14 9-4 6" />
+      </svg>
+    );
+  }
+
+  if (type === "blockchain") {
+    return (
+      <svg
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        className={iconClassName}
+        aria-hidden="true"
+      >
+        <rect x="3" y="4" width="6" height="6" rx="1.5" />
+        <rect x="15" y="4" width="6" height="6" rx="1.5" />
+        <rect x="9" y="14" width="6" height="6" rx="1.5" />
+        <path d="M9 7h6" />
+        <path d="m7.5 10 3 4" />
+        <path d="m16.5 10-3 4" />
+      </svg>
+    );
+  }
+
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={iconClassName}
+      aria-hidden="true"
+    >
+      <path d="M12 3v3" />
+      <path d="M12 18v3" />
+      <path d="M3 12h3" />
+      <path d="M18 12h3" />
+      <rect x="7" y="7" width="10" height="10" rx="3" />
+      <path d="M10 12h4" />
+      <path d="M12 10v4" />
+    </svg>
+  );
+}
 
 function Home() {
   return (
@@ -94,7 +164,9 @@ function Home() {
         <div className="mt-10 grid gap-5 md:grid-cols-3">
           {reasons.map((reason) => (
             <Card key={reason.title}>
-              <div className="mb-5 h-12 w-12 rounded-2xl border border-cyan-300/20 bg-cyan-300/10 shadow-lg shadow-cyan-950/30" />
+              <div className="mb-5 grid h-12 w-12 place-items-center rounded-2xl border border-cyan-300/20 bg-cyan-300/10 shadow-lg shadow-cyan-950/30">
+                <ReasonIcon type={reason.icon} />
+              </div>
               <h3 className="text-xl font-semibold text-white">{reason.title}</h3>
               <p className="mt-3 leading-7 text-slate-300">{reason.text}</p>
             </Card>
