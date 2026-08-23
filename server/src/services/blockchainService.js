@@ -56,6 +56,7 @@ const REQUIRED_CHAIN_ID = 11155111;
 const REQUIRED_CHAIN_NAME = "Sepolia";
 const NFT_EVENT_QUERY_CHUNK_SIZE = 25_000;
 const NFT_EVENT_QUERY_MIN_CHUNK_SIZE = 500;
+const NFT_EVENT_QUERY_FALLBACK_LOOKBACK_BLOCKS = 100_000;
 
 const PANIC_REASONS = {
   "0x00": "Generic compiler inserted panic",
@@ -404,6 +405,32 @@ function getProofBlockchainConfigStatus() {
   };
 }
 
+function getConfiguredNFTDeploymentBlock() {
+  const rawDeploymentBlock = process.env.TRUSTAI_NFT_DEPLOYMENT_BLOCK?.trim();
+
+  if (!rawDeploymentBlock) {
+    return null;
+  }
+
+  if (!/^\d+$/.test(rawDeploymentBlock)) {
+    console.warn("[NFT Mint] Ignoring invalid TRUSTAI_NFT_DEPLOYMENT_BLOCK", {
+      value: rawDeploymentBlock,
+    });
+    return null;
+  }
+
+  const deploymentBlock = Number(rawDeploymentBlock);
+
+  if (!Number.isSafeInteger(deploymentBlock) || deploymentBlock <= 0) {
+    console.warn("[NFT Mint] Ignoring invalid TRUSTAI_NFT_DEPLOYMENT_BLOCK", {
+      value: rawDeploymentBlock,
+    });
+    return null;
+  }
+
+  return deploymentBlock;
+}
+
 async function getRunnerNetworkContext(contractRunner) {
   const provider = contractRunner?.provider;
 
@@ -553,33 +580,46 @@ async function getNFTDeploymentBlock(trustAIContentNFT) {
     }
 
     const latestBlock = await provider.getBlockNumber();
-    const latestCode = await provider.getCode(contractAddress, latestBlock);
+    const configuredDeploymentBlock = getConfiguredNFTDeploymentBlock();
 
-    if (!latestCode || latestCode === "0x") {
-      throw new Error(`NFT contract has no deployed bytecode at ${contractAddress}`);
-    }
-
-    let low = 0;
-    let high = latestBlock;
-
-    while (low < high) {
-      const mid = Math.floor((low + high) / 2);
-      const code = await provider.getCode(contractAddress, mid);
-
-      if (code && code !== "0x") {
-        high = mid;
-      } else {
-        low = mid + 1;
+    if (configuredDeploymentBlock) {
+      if (configuredDeploymentBlock > latestBlock) {
+        throw new Error(
+          `TRUSTAI_NFT_DEPLOYMENT_BLOCK ${configuredDeploymentBlock} is greater than latest Sepolia block ${latestBlock}.`
+        );
       }
+
+      logNFTMintDebug("Using configured NFT deployment block", {
+        contractAddress,
+        deploymentBlock: configuredDeploymentBlock,
+        latestBlock,
+      });
+
+      return configuredDeploymentBlock;
     }
 
-    logNFTMintDebug("NFT deployment block detected", {
+    const fallbackFromBlock = Math.max(
+      0,
+      latestBlock - NFT_EVENT_QUERY_FALLBACK_LOOKBACK_BLOCKS
+    );
+
+    console.warn(
+      "[NFT Mint] TRUSTAI_NFT_DEPLOYMENT_BLOCK is not configured. Using bounded recent-block fallback for duplicate lookup.",
+      {
+        contractAddress,
+        fallbackFromBlock,
+        latestBlock,
+        lookbackBlocks: NFT_EVENT_QUERY_FALLBACK_LOOKBACK_BLOCKS,
+      }
+    );
+
+    logNFTMintDebug("Using fallback NFT event fromBlock", {
       contractAddress,
-      deploymentBlock: low,
+      deploymentBlock: fallbackFromBlock,
       latestBlock,
     });
 
-    return low;
+    return fallbackFromBlock;
   })().catch((error) => {
     nftDeploymentBlockPromise = undefined;
     throw error;
