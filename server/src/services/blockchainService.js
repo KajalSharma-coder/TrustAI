@@ -1,6 +1,7 @@
 import {
   AbiCoder,
   Contract,
+  formatEther,
   Interface,
   JsonRpcProvider,
   Wallet,
@@ -19,17 +20,24 @@ const TRUSTAI_NFT_ABI = [
   "function contentHash(uint256 tokenId) external view returns (bytes32)",
   "function timestamp(uint256 tokenId) external view returns (uint256)",
   "function creator(uint256 tokenId) external view returns (address)",
-  "function tokenURI(uint256 tokenId) external view returns (string)",
   "event ContentTokenized(uint256 indexed tokenId, bytes32 indexed contentHash, address indexed creator, uint256 timestamp)",
 ];
 const REQUIRED_TRUSTAI_PROOF_FUNCTIONS = [
   "storeProof(bytes32)",
   "verifyProof(bytes32)",
 ];
+const REQUIRED_TRUSTAI_NFT_FUNCTIONS = [
+  "mintContent(bytes32)",
+  "ownerOf(uint256)",
+  "contentHash(uint256)",
+  "timestamp(uint256)",
+  "creator(uint256)",
+];
 
 let contract;
 let nftContract;
 let contractVerificationPromise;
+let nftDeploymentBlockPromise;
 const mockProofs = new Map();
 
 const EXPLORER_BASE_URLS_BY_CHAIN_ID = {
@@ -44,6 +52,10 @@ const REVERT_REASON_ABI_CODER = AbiCoder.defaultAbiCoder();
 const ERROR_STRING_SELECTOR = "0x08c379a0";
 const PANIC_SELECTOR = "0x4e487b71";
 const TRUSTAI_NFT_MINT_FUNCTION = "mintContent";
+const REQUIRED_CHAIN_ID = 11155111;
+const REQUIRED_CHAIN_NAME = "Sepolia";
+const NFT_EVENT_QUERY_CHUNK_SIZE = 25_000;
+const NFT_EVENT_QUERY_MIN_CHUNK_SIZE = 500;
 
 const PANIC_REASONS = {
   "0x00": "Generic compiler inserted panic",
@@ -210,12 +222,26 @@ function getBlockchainErrorDetails(error) {
   };
 }
 
+function getUserFacingBlockchainError(error) {
+  const details = getBlockchainErrorDetails(error);
+
+  return (
+    details.reason ||
+    details.shortMessage ||
+    error?.reason ||
+    error?.shortMessage ||
+    error?.message ||
+    "Unknown blockchain error"
+  );
+}
+
 function createMintError(error, stage) {
   const details = getBlockchainErrorDetails(error);
   const reason =
     details.reason ||
     details.shortMessage ||
     details.message ||
+    String(error || "") ||
     "Unknown blockchain error";
   const mintError = new Error(`NFT minting failed during ${stage}: ${reason}`);
 
@@ -268,6 +294,25 @@ function getTrustAIContentNFTContract() {
 
   nftContract = new Contract(contractAddress, TRUSTAI_NFT_ABI, wallet);
   return nftContract;
+}
+
+function verifyTrustAIContentNFTAbi() {
+  const contractInterface = new Interface(TRUSTAI_NFT_ABI);
+
+  for (const functionSignature of REQUIRED_TRUSTAI_NFT_FUNCTIONS) {
+    const fragment = contractInterface.getFunction(functionSignature);
+    const expectedSelector = id(functionSignature).slice(0, 10);
+
+    if (!fragment || fragment.selector !== expectedSelector) {
+      throw new Error(`TrustAIContentNFT ABI mismatch for ${functionSignature}`);
+    }
+  }
+
+  const eventFragment = contractInterface.getEvent("ContentTokenized");
+
+  if (!eventFragment) {
+    throw new Error("TrustAIContentNFT ABI mismatch for ContentTokenized event");
+  }
 }
 
 function verifyTrustAIProofAbi() {
@@ -332,13 +377,116 @@ async function getVerifiedTrustAIProofContract() {
 function getBlockchainConfigStatus() {
   const rpcUrl = getOptionalEnv("BLOCKCHAIN_RPC_URL");
   const privateKey = getOptionalEnv("BLOCKCHAIN_PRIVATE_KEY");
-  const contractAddress = getOptionalEnv("TRUSTAI_PROOF_CONTRACT_ADDRESS");
+  const proofContractAddress = getOptionalEnv("TRUSTAI_PROOF_CONTRACT_ADDRESS");
+  const nftContractAddress = getOptionalEnv("TRUSTAI_NFT_CONTRACT_ADDRESS");
 
   return {
-    isConfigured: Boolean(rpcUrl && privateKey && contractAddress),
+    isConfigured: Boolean(
+      rpcUrl && privateKey && proofContractAddress && nftContractAddress
+    ),
     rpcUrlConfigured: Boolean(rpcUrl),
     privateKeyConfigured: Boolean(privateKey),
-    contractAddressConfigured: Boolean(contractAddress),
+    proofContractAddressConfigured: Boolean(proofContractAddress),
+    nftContractAddressConfigured: Boolean(nftContractAddress),
+  };
+}
+
+function getProofBlockchainConfigStatus() {
+  const rpcUrl = getOptionalEnv("BLOCKCHAIN_RPC_URL");
+  const privateKey = getOptionalEnv("BLOCKCHAIN_PRIVATE_KEY");
+  const proofContractAddress = getOptionalEnv("TRUSTAI_PROOF_CONTRACT_ADDRESS");
+
+  return {
+    isConfigured: Boolean(rpcUrl && privateKey && proofContractAddress),
+    rpcUrlConfigured: Boolean(rpcUrl),
+    privateKeyConfigured: Boolean(privateKey),
+    proofContractAddressConfigured: Boolean(proofContractAddress),
+  };
+}
+
+async function getRunnerNetworkContext(contractRunner) {
+  const provider = contractRunner?.provider;
+
+  if (!provider) {
+    throw new Error("Blockchain provider is not configured");
+  }
+
+  const network = await provider.getNetwork();
+  const chainId = Number(network.chainId);
+
+  return {
+    provider,
+    chainId,
+    networkName: network.name === "unknown" ? "" : network.name,
+  };
+}
+
+async function assertSepoliaNetwork(contractRunner) {
+  const networkContext = await getRunnerNetworkContext(contractRunner);
+
+  if (networkContext.chainId !== REQUIRED_CHAIN_ID) {
+    throw new Error(
+      `Backend is connected to chain ID ${networkContext.chainId}, expected ${REQUIRED_CHAIN_ID} (${REQUIRED_CHAIN_NAME}).`
+    );
+  }
+
+  return networkContext;
+}
+
+async function assertDeployedContract(provider, contractAddress, label) {
+  const bytecode = await provider.getCode(contractAddress);
+  const isDeployed = Boolean(bytecode && bytecode !== "0x");
+
+  if (!isDeployed) {
+    throw new Error(`${label} has no deployed bytecode at ${contractAddress}`);
+  }
+
+  return {
+    isDeployed,
+    bytecodeSizeBytes: (bytecode.length - 2) / 2,
+  };
+}
+
+async function assertWalletCanPayForMint({
+  provider,
+  walletAddress,
+  estimatedGas,
+}) {
+  const [balance, feeData] = await Promise.all([
+    provider.getBalance(walletAddress),
+    provider.getFeeData(),
+  ]);
+  const gasPrice = feeData.maxFeePerGas || feeData.gasPrice;
+
+  if (!gasPrice) {
+    return {
+      balance,
+      balanceEth: formatEther(balance),
+      gasPrice: null,
+      estimatedCost: null,
+      estimatedCostEth: "",
+      hasSufficientEth: balance > 0n,
+    };
+  }
+
+  const estimatedCost = estimatedGas * gasPrice;
+  const hasSufficientEth = balance >= estimatedCost;
+
+  if (!hasSufficientEth) {
+    throw new Error(
+      `Wallet has insufficient Sepolia ETH. Balance ${formatEther(
+        balance
+      )} ETH, estimated mint cost ${formatEther(estimatedCost)} ETH.`
+    );
+  }
+
+  return {
+    balance,
+    balanceEth: formatEther(balance),
+    gasPrice,
+    estimatedCost,
+    estimatedCostEth: formatEther(estimatedCost),
+    hasSufficientEth,
   };
 }
 
@@ -381,20 +529,122 @@ function addExplorerLinks(data, explorerBaseUrl) {
 
 async function getOptionalTokenUri(trustAIContentNFT, tokenId) {
   try {
+    if (typeof trustAIContentNFT.tokenURI !== "function") {
+      return "";
+    }
+
     return await trustAIContentNFT.tokenURI(tokenId);
   } catch {
     return "";
   }
 }
 
+async function getNFTDeploymentBlock(trustAIContentNFT) {
+  if (nftDeploymentBlockPromise) {
+    return nftDeploymentBlockPromise;
+  }
+
+  nftDeploymentBlockPromise = (async () => {
+    const provider = trustAIContentNFT.runner?.provider;
+    const contractAddress = await trustAIContentNFT.getAddress();
+
+    if (!provider) {
+      throw new Error("Blockchain provider is not configured");
+    }
+
+    const latestBlock = await provider.getBlockNumber();
+    const latestCode = await provider.getCode(contractAddress, latestBlock);
+
+    if (!latestCode || latestCode === "0x") {
+      throw new Error(`NFT contract has no deployed bytecode at ${contractAddress}`);
+    }
+
+    let low = 0;
+    let high = latestBlock;
+
+    while (low < high) {
+      const mid = Math.floor((low + high) / 2);
+      const code = await provider.getCode(contractAddress, mid);
+
+      if (code && code !== "0x") {
+        high = mid;
+      } else {
+        low = mid + 1;
+      }
+    }
+
+    logNFTMintDebug("NFT deployment block detected", {
+      contractAddress,
+      deploymentBlock: low,
+      latestBlock,
+    });
+
+    return low;
+  })().catch((error) => {
+    nftDeploymentBlockPromise = undefined;
+    throw error;
+  });
+
+  return nftDeploymentBlockPromise;
+}
+
+async function queryNFTEventsInChunks(trustAIContentNFT, filter) {
+  const provider = trustAIContentNFT.runner?.provider;
+
+  if (!provider) {
+    throw new Error("Blockchain provider is not configured");
+  }
+
+  const fromBlock = await getNFTDeploymentBlock(trustAIContentNFT);
+  const latestBlock = await provider.getBlockNumber();
+  const events = [];
+  let currentFromBlock = fromBlock;
+  let chunkSize = NFT_EVENT_QUERY_CHUNK_SIZE;
+
+  while (currentFromBlock <= latestBlock) {
+    const currentToBlock = Math.min(
+      currentFromBlock + chunkSize - 1,
+      latestBlock
+    );
+
+    try {
+      const chunkEvents = await trustAIContentNFT.queryFilter(
+        filter,
+        currentFromBlock,
+        currentToBlock
+      );
+      events.push(...chunkEvents);
+      currentFromBlock = currentToBlock + 1;
+    } catch (error) {
+      if (chunkSize > NFT_EVENT_QUERY_MIN_CHUNK_SIZE) {
+        chunkSize = Math.max(
+          Math.floor(chunkSize / 2),
+          NFT_EVENT_QUERY_MIN_CHUNK_SIZE
+        );
+        logNFTMintDebug("Reducing NFT event query chunk size", {
+          nextChunkSize: chunkSize,
+          fromBlock: currentFromBlock,
+          toBlock: currentToBlock,
+          reason: getUserFacingBlockchainError(error),
+        });
+        continue;
+      }
+
+      throw error;
+    }
+  }
+
+  return events;
+}
+
 async function getContentTokenizedEvents(trustAIContentNFT, contentHash) {
   const filter = trustAIContentNFT.filters.ContentTokenized(null, contentHash);
-  return trustAIContentNFT.queryFilter(filter, 0, "latest");
+  return queryNFTEventsInChunks(trustAIContentNFT, filter);
 }
 
 async function getTokenEvent(trustAIContentNFT, tokenId) {
   const filter = trustAIContentNFT.filters.ContentTokenized(tokenId);
-  const events = await trustAIContentNFT.queryFilter(filter, 0, "latest");
+  const events = await queryNFTEventsInChunks(trustAIContentNFT, filter);
   return events.at(-1) || null;
 }
 
@@ -489,7 +739,7 @@ function storeMockProof(contentHash) {
 
 export async function storeProof(contentHash) {
   const normalizedHash = normalizeContentHash(contentHash);
-  const configStatus = getBlockchainConfigStatus();
+  const configStatus = getProofBlockchainConfigStatus();
 
   if (!configStatus.isConfigured) {
     console.warn(
@@ -516,7 +766,7 @@ export async function storeProof(contentHash) {
 
 export async function verifyProof(contentHash) {
   const normalizedHash = normalizeContentHash(contentHash);
-  const configStatus = getBlockchainConfigStatus();
+  const configStatus = getProofBlockchainConfigStatus();
 
   if (!configStatus.isConfigured) {
     return mockProofs.has(normalizedHash);
@@ -527,13 +777,81 @@ export async function verifyProof(contentHash) {
   return trustAIProof.verifyProof(normalizedHash);
 }
 
+export async function getBlockchainDiagnostics() {
+  const configStatus = getBlockchainConfigStatus();
+  const diagnostics = {
+    ...configStatus,
+    expectedChainId: REQUIRED_CHAIN_ID,
+    expectedNetwork: REQUIRED_CHAIN_NAME,
+    chainId: null,
+    chainMatchesExpected: false,
+    walletAddress: "",
+    walletBalanceEth: "",
+    proofContractAddress: process.env.TRUSTAI_PROOF_CONTRACT_ADDRESS?.trim() || "",
+    nftContractAddress: process.env.TRUSTAI_NFT_CONTRACT_ADDRESS?.trim() || "",
+    proofContractDeployed: false,
+    nftContractDeployed: false,
+    nftAbiMatchesExpected: false,
+  };
+
+  if (!configStatus.isConfigured) {
+    return diagnostics;
+  }
+
+  verifyTrustAIContentNFTAbi();
+  diagnostics.nftAbiMatchesExpected = true;
+
+  const trustAIProof = await getVerifiedTrustAIProofContract();
+  const trustAIContentNFT = getTrustAIContentNFTContract();
+  const walletAddress = await trustAIContentNFT.runner.getAddress();
+  const { provider, chainId } = await getRunnerNetworkContext(
+    trustAIContentNFT.runner
+  );
+  const [walletBalance, proofDeployment, nftDeployment] = await Promise.all([
+    provider.getBalance(walletAddress),
+    assertDeployedContract(
+      provider,
+      await trustAIProof.getAddress(),
+      "TRUSTAI_PROOF_CONTRACT_ADDRESS"
+    ),
+    assertDeployedContract(
+      provider,
+      await trustAIContentNFT.getAddress(),
+      "TRUSTAI_NFT_CONTRACT_ADDRESS"
+    ),
+  ]);
+
+  diagnostics.chainId = chainId;
+  diagnostics.chainMatchesExpected = chainId === REQUIRED_CHAIN_ID;
+  diagnostics.walletAddress = walletAddress;
+  diagnostics.walletBalanceEth = formatEther(walletBalance);
+  diagnostics.proofContractDeployed = proofDeployment.isDeployed;
+  diagnostics.nftContractDeployed = nftDeployment.isDeployed;
+  diagnostics.proofBytecodeSizeBytes = proofDeployment.bytecodeSizeBytes;
+  diagnostics.nftBytecodeSizeBytes = nftDeployment.bytecodeSizeBytes;
+
+  return diagnostics;
+}
+
 export async function mintContentNFT(contentHash) {
   const normalizedHash = normalizeContentHash(contentHash);
+  verifyTrustAIContentNFTAbi();
   const trustAIProof = await getVerifiedTrustAIProofContract();
   const trustAIContentNFT = getTrustAIContentNFTContract();
   const contractAddress = await trustAIContentNFT.getAddress();
   const walletAddress = await trustAIContentNFT.runner.getAddress();
+  const networkContext = await assertSepoliaNetwork(trustAIContentNFT.runner);
   const explorerContext = await getExplorerContext(trustAIContentNFT.runner);
+
+  try {
+    await assertDeployedContract(
+      networkContext.provider,
+      contractAddress,
+      "TRUSTAI_NFT_CONTRACT_ADDRESS"
+    );
+  } catch (error) {
+    throw createMintError(error, "NFT contract deployment check");
+  }
 
   logNFTMintDebug("Starting mint", {
     contractAddress,
@@ -559,6 +877,7 @@ export async function mintContentNFT(contentHash) {
   }
 
   let existingNFT;
+  let duplicateLookupWarning = "";
 
   try {
     existingNFT = await findTokenizedContent(normalizedHash);
@@ -567,8 +886,12 @@ export async function mintContentNFT(contentHash) {
       existingTokenId: existingNFT?.tokenId || "",
     });
   } catch (error) {
-    console.error("[NFT Mint] Duplicate lookup failed", getBlockchainErrorDetails(error));
-    throw createMintError(error, "duplicate lookup");
+    duplicateLookupWarning =
+      "Duplicate NFT lookup could not be completed because the RPC provider failed while reading historical NFT events. Continuing mint because this deployed NFT contract has no direct contentHash-to-tokenId lookup.";
+    console.warn("[NFT Mint] Duplicate lookup skipped", {
+      ...getBlockchainErrorDetails(error),
+      warning: duplicateLookupWarning,
+    });
   }
 
   if (existingNFT) {
@@ -605,6 +928,27 @@ export async function mintContentNFT(contentHash) {
   } catch (error) {
     console.error("[NFT Mint] Gas estimation failed", getBlockchainErrorDetails(error));
     throw createMintError(error, "gas estimation");
+  }
+
+  try {
+    const walletFunding = await assertWalletCanPayForMint({
+      provider: networkContext.provider,
+      walletAddress,
+      estimatedGas,
+    });
+
+    logNFTMintDebug("Wallet funding check completed", {
+      walletAddress,
+      balanceEth: walletFunding.balanceEth,
+      estimatedCostEth: walletFunding.estimatedCostEth,
+      hasSufficientEth: walletFunding.hasSufficientEth,
+    });
+  } catch (error) {
+    console.error(
+      "[NFT Mint] Wallet funding check failed",
+      getBlockchainErrorDetails(error)
+    );
+    throw createMintError(error, "wallet funding check");
   }
 
   let transaction;
@@ -673,6 +1017,7 @@ export async function mintContentNFT(contentHash) {
     ...nft,
     transactionHash: receipt.hash,
     receiptStatus: Number(receipt.status),
+    duplicateLookupWarning,
   };
 }
 
@@ -695,8 +1040,8 @@ export async function verifyContentNFT(tokenId) {
 
       return addExplorerLinks(
         {
-        exists: false,
-        tokenId: normalizedTokenId.toString(),
+          exists: false,
+          tokenId: normalizedTokenId.toString(),
           contractAddress,
           chainId: explorerContext.chainId,
           networkName: explorerContext.networkName,

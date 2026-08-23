@@ -1,9 +1,4 @@
-const DEFAULT_LOCAL_API_BASE_URLS = [
-  "http://localhost:5000",
-  "http://localhost:5001",
-  "http://localhost:5002",
-  "http://localhost:5003",
-];
+const DEFAULT_LOCAL_API_BASE_URL = "http://localhost:5000";
 
 function getApiBaseUrls() {
   const configuredBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim();
@@ -12,7 +7,7 @@ function getApiBaseUrls() {
     return [configuredBaseUrl.replace(/\/$/, "")];
   }
 
-  return DEFAULT_LOCAL_API_BASE_URLS;
+  return [DEFAULT_LOCAL_API_BASE_URL];
 }
 
 function shouldTryNextApiBase(response, data) {

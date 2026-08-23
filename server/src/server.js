@@ -8,6 +8,7 @@ import blockchainRoutes from "./routes/blockchainRoutes.js";
 import dashboardRoutes from "./routes/dashboardRoutes.js";
 import healthRoutes from "./routes/healthRoutes.js";
 import verificationRoutes from "./routes/verificationRoutes.js";
+import { getBlockchainDiagnostics } from "./services/blockchainService.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -34,6 +35,22 @@ app.use("/api/dashboard", dashboardRoutes);
 
 const server = app.listen(PORT, () => {
   console.log(`TrustAI server is running on port ${PORT}`);
+  getBlockchainDiagnostics()
+    .then((diagnostics) => {
+      console.log("[Blockchain] Diagnostics", {
+        rpcConfigured: diagnostics.rpcUrlConfigured,
+        chainId: diagnostics.chainId,
+        chainMatchesExpected: diagnostics.chainMatchesExpected,
+        proofContractAddress: diagnostics.proofContractAddress,
+        nftContractAddress: diagnostics.nftContractAddress,
+        nftContractDeployed: diagnostics.nftContractDeployed,
+      });
+    })
+    .catch((error) => {
+      console.error("[Blockchain] Diagnostics failed", {
+        message: error.message,
+      });
+    });
 });
 
 server.on("error", (error) => {

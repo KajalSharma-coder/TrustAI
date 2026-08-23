@@ -1,4 +1,5 @@
 import {
+  getBlockchainDiagnostics,
   mintContentNFT,
   storeProof,
   verifyContentNFT,
@@ -186,6 +187,28 @@ export async function verifyBlockchainNFT(req, res) {
     return res.status(500).json({
       success: false,
       message: "Unable to verify NFT on blockchain. Please try again.",
+    });
+  }
+}
+
+export async function getBlockchainDiagnosticsStatus(req, res) {
+  try {
+    const diagnostics = await getBlockchainDiagnostics();
+
+    return res.json({
+      success: true,
+      diagnostics,
+    });
+  } catch (error) {
+    logBlockchainError("Blockchain diagnostics", error);
+
+    return res.status(500).json({
+      success: false,
+      message:
+        error.message || "Unable to read blockchain diagnostics. Please try again.",
+      developerMessage:
+        error.message || "Unable to read blockchain diagnostics. Please try again.",
+      details: error.details || null,
     });
   }
 }

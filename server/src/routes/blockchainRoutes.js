@@ -1,5 +1,6 @@
 import { Router } from "express";
 import {
+  getBlockchainDiagnosticsStatus,
   mintBlockchainNFT,
   storeBlockchainProof,
   verifyBlockchainNFT,
@@ -8,6 +9,7 @@ import {
 
 const router = Router();
 
+router.get("/diagnostics", getBlockchainDiagnosticsStatus);
 router.post("/store-proof", storeBlockchainProof);
 router.post("/verify-proof", verifyBlockchainProof);
 router.post("/mint-nft", mintBlockchainNFT);
