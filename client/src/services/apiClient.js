@@ -55,7 +55,10 @@ export async function postJson(path, body) {
     }
 
     if (!response.ok) {
-      lastError = new Error(data?.message || "Request failed");
+      lastError = new Error(
+        data?.developerMessage || data?.message || "Request failed"
+      );
+      lastError.data = data;
 
       if (shouldTryNextApiBase(response, data) && apiBaseUrl !== apiBaseUrls.at(-1)) {
         continue;

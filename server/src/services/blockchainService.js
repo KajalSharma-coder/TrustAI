@@ -1,4 +1,5 @@
 import {
+  AbiCoder,
   Contract,
   Interface,
   JsonRpcProvider,
@@ -12,14 +13,50 @@ const TRUSTAI_PROOF_ABI = [
   "function storeProof(bytes32 contentHash) external",
   "function verifyProof(bytes32 contentHash) external view returns (bool)",
 ];
+const TRUSTAI_NFT_ABI = [
+  "function mintContent(bytes32 contentHash) external returns (uint256 tokenId)",
+  "function ownerOf(uint256 tokenId) external view returns (address)",
+  "function contentHash(uint256 tokenId) external view returns (bytes32)",
+  "function timestamp(uint256 tokenId) external view returns (uint256)",
+  "function creator(uint256 tokenId) external view returns (address)",
+  "function tokenURI(uint256 tokenId) external view returns (string)",
+  "event ContentTokenized(uint256 indexed tokenId, bytes32 indexed contentHash, address indexed creator, uint256 timestamp)",
+];
 const REQUIRED_TRUSTAI_PROOF_FUNCTIONS = [
   "storeProof(bytes32)",
   "verifyProof(bytes32)",
 ];
 
 let contract;
+let nftContract;
 let contractVerificationPromise;
 const mockProofs = new Map();
+
+const EXPLORER_BASE_URLS_BY_CHAIN_ID = {
+  1: "https://etherscan.io",
+  5: "https://goerli.etherscan.io",
+  11155111: "https://sepolia.etherscan.io",
+  17000: "https://holesky.etherscan.io",
+  137: "https://polygonscan.com",
+  80002: "https://amoy.polygonscan.com",
+};
+const REVERT_REASON_ABI_CODER = AbiCoder.defaultAbiCoder();
+const ERROR_STRING_SELECTOR = "0x08c379a0";
+const PANIC_SELECTOR = "0x4e487b71";
+const TRUSTAI_NFT_MINT_FUNCTION = "mintContent";
+
+const PANIC_REASONS = {
+  "0x00": "Generic compiler inserted panic",
+  "0x01": "Assertion failed",
+  "0x11": "Arithmetic overflow or underflow",
+  "0x12": "Division or modulo by zero",
+  "0x21": "Invalid enum conversion",
+  "0x22": "Incorrectly encoded storage byte array",
+  "0x31": "pop() on an empty array",
+  "0x32": "Array index out of bounds",
+  "0x41": "Memory allocation overflow",
+  "0x51": "Call to zero-initialized internal function",
+};
 
 function requireEnv(name) {
   const value = process.env[name];
@@ -75,6 +112,124 @@ function normalizeContentHash(contentHash) {
   return `0x${withoutPrefix.toLowerCase()}`;
 }
 
+function normalizeTokenId(tokenId) {
+  const normalized =
+    typeof tokenId === "bigint" ? tokenId.toString() : String(tokenId || "").trim();
+
+  if (!/^\d+$/.test(normalized)) {
+    throw new Error("Token ID must be a positive integer");
+  }
+
+  const tokenIdBigInt = BigInt(normalized);
+
+  if (tokenIdBigInt <= 0n) {
+    throw new Error("Token ID must be a positive integer");
+  }
+
+  return tokenIdBigInt;
+}
+
+function getNestedErrorValue(error, key) {
+  let current = error;
+
+  while (current && typeof current === "object") {
+    if (current[key]) {
+      return current[key];
+    }
+
+    current = current.error || current.info?.error;
+  }
+
+  return undefined;
+}
+
+function getRevertData(error) {
+  const candidates = [
+    error?.data,
+    error?.error?.data,
+    error?.info?.error?.data,
+    error?.receipt?.revertReason,
+    getNestedErrorValue(error, "data"),
+  ];
+
+  return candidates.find(
+    (candidate) => typeof candidate === "string" && candidate.startsWith("0x")
+  );
+}
+
+function decodeRevertReason(error) {
+  if (error?.reason) {
+    return error.reason;
+  }
+
+  if (error?.shortMessage) {
+    return error.shortMessage;
+  }
+
+  const revertData = getRevertData(error);
+
+  if (!revertData || revertData === "0x") {
+    return "";
+  }
+
+  try {
+    if (revertData.startsWith(ERROR_STRING_SELECTOR)) {
+      const [reason] = REVERT_REASON_ABI_CODER.decode(
+        ["string"],
+        `0x${revertData.slice(10)}`
+      );
+      return reason;
+    }
+
+    if (revertData.startsWith(PANIC_SELECTOR)) {
+      const [panicCode] = REVERT_REASON_ABI_CODER.decode(
+        ["uint256"],
+        `0x${revertData.slice(10)}`
+      );
+      const code = `0x${panicCode.toString(16).padStart(2, "0")}`;
+      return `Panic ${code}: ${PANIC_REASONS[code] || "Unknown panic"}`;
+    }
+  } catch {
+    return "";
+  }
+
+  return "";
+}
+
+function getBlockchainErrorDetails(error) {
+  return {
+    code: error?.code || "",
+    action: error?.action || "",
+    reason: decodeRevertReason(error),
+    shortMessage: error?.shortMessage || "",
+    message: error?.message || "",
+    transactionHash: error?.transactionHash || error?.receipt?.hash || "",
+    receiptStatus:
+      error?.receipt?.status === undefined ? undefined : Number(error.receipt.status),
+    revertData: getRevertData(error) || "",
+  };
+}
+
+function createMintError(error, stage) {
+  const details = getBlockchainErrorDetails(error);
+  const reason =
+    details.reason ||
+    details.shortMessage ||
+    details.message ||
+    "Unknown blockchain error";
+  const mintError = new Error(`NFT minting failed during ${stage}: ${reason}`);
+
+  mintError.code = error?.code || "NFT_MINT_FAILED";
+  mintError.stage = stage;
+  mintError.details = details;
+
+  return mintError;
+}
+
+function logNFTMintDebug(message, details = {}) {
+  console.log(`[NFT Mint] ${message}`, details);
+}
+
 function getTrustAIProofContract() {
   if (contract) {
     return contract;
@@ -93,6 +248,26 @@ function getTrustAIProofContract() {
 
   contract = new Contract(contractAddress, TRUSTAI_PROOF_ABI, wallet);
   return contract;
+}
+
+function getTrustAIContentNFTContract() {
+  if (nftContract) {
+    return nftContract;
+  }
+
+  const rpcUrl = requireEnv("BLOCKCHAIN_RPC_URL");
+  const privateKey = normalizePrivateKey(requireEnv("BLOCKCHAIN_PRIVATE_KEY"));
+  const contractAddress = requireEnv("TRUSTAI_NFT_CONTRACT_ADDRESS");
+
+  if (!isAddress(contractAddress)) {
+    throw new Error("TRUSTAI_NFT_CONTRACT_ADDRESS is invalid");
+  }
+
+  const provider = new JsonRpcProvider(rpcUrl);
+  const wallet = new Wallet(privateKey, provider);
+
+  nftContract = new Contract(contractAddress, TRUSTAI_NFT_ABI, wallet);
+  return nftContract;
 }
 
 function verifyTrustAIProofAbi() {
@@ -167,6 +342,124 @@ function getBlockchainConfigStatus() {
   };
 }
 
+async function getExplorerContext(contractRunner) {
+  const provider = contractRunner?.provider;
+
+  if (!provider) {
+    return {
+      chainId: null,
+      networkName: "",
+      explorerBaseUrl: "",
+    };
+  }
+
+  const network = await provider.getNetwork();
+  const chainId = Number(network.chainId);
+
+  return {
+    chainId,
+    networkName: network.name === "unknown" ? "" : network.name,
+    explorerBaseUrl: EXPLORER_BASE_URLS_BY_CHAIN_ID[chainId] || "",
+  };
+}
+
+function addExplorerLinks(data, explorerBaseUrl) {
+  if (!explorerBaseUrl) {
+    return data;
+  }
+
+  return {
+    ...data,
+    transactionUrl: data.transactionHash
+      ? `${explorerBaseUrl}/tx/${data.transactionHash}`
+      : "",
+    contractUrl: data.contractAddress
+      ? `${explorerBaseUrl}/address/${data.contractAddress}`
+      : "",
+  };
+}
+
+async function getOptionalTokenUri(trustAIContentNFT, tokenId) {
+  try {
+    return await trustAIContentNFT.tokenURI(tokenId);
+  } catch {
+    return "";
+  }
+}
+
+async function getContentTokenizedEvents(trustAIContentNFT, contentHash) {
+  const filter = trustAIContentNFT.filters.ContentTokenized(null, contentHash);
+  return trustAIContentNFT.queryFilter(filter, 0, "latest");
+}
+
+async function getTokenEvent(trustAIContentNFT, tokenId) {
+  const filter = trustAIContentNFT.filters.ContentTokenized(tokenId);
+  const events = await trustAIContentNFT.queryFilter(filter, 0, "latest");
+  return events.at(-1) || null;
+}
+
+async function readNFTDetails(trustAIContentNFT, tokenId, eventLog = null) {
+  const contractAddress = await trustAIContentNFT.getAddress();
+  const [owner, tokenContentHash, mintedAt, creatorAddress, tokenUri] =
+    await Promise.all([
+      trustAIContentNFT.ownerOf(tokenId),
+      trustAIContentNFT.contentHash(tokenId),
+      trustAIContentNFT.timestamp(tokenId),
+      trustAIContentNFT.creator(tokenId),
+      getOptionalTokenUri(trustAIContentNFT, tokenId),
+    ]);
+  const explorerContext = await getExplorerContext(trustAIContentNFT.runner);
+  const transactionHash = eventLog?.transactionHash || "";
+  const proofExists = await verifyProof(tokenContentHash);
+  const verificationStatus = proofExists
+    ? "Blockchain proof verified"
+    : "Blockchain proof not found";
+
+  return addExplorerLinks(
+    {
+      exists: true,
+      tokenId: tokenId.toString(),
+      owner,
+      creator: creatorAddress,
+      contractAddress,
+      contentHash: tokenContentHash,
+      mintTimestamp: Number(mintedAt),
+      verificationStatus,
+      transactionHash,
+      tokenUri,
+      metadata: {
+        contentHash: tokenContentHash,
+        contentTitle: "",
+        creator: creatorAddress,
+        creationTimestamp: Number(mintedAt),
+        aiVerificationStatus: verificationStatus,
+        tokenUri,
+      },
+      chainId: explorerContext.chainId,
+      networkName: explorerContext.networkName,
+      explorerBaseUrl: explorerContext.explorerBaseUrl,
+    },
+    explorerContext.explorerBaseUrl
+  );
+}
+
+async function findTokenizedContent(normalizedHash) {
+  const trustAIContentNFT = getTrustAIContentNFTContract();
+  const events = await getContentTokenizedEvents(trustAIContentNFT, normalizedHash);
+
+  for (const eventLog of [...events].reverse()) {
+    const tokenId = eventLog.args.tokenId;
+
+    try {
+      return await readNFTDetails(trustAIContentNFT, tokenId, eventLog);
+    } catch {
+      // Keep searching in case a later read fails unexpectedly.
+    }
+  }
+
+  return null;
+}
+
 function createMockTransactionHash(contentHash, timestamp) {
   return `0x${crypto
     .createHash("sha256")
@@ -232,4 +525,187 @@ export async function verifyProof(contentHash) {
   const trustAIProof = await getVerifiedTrustAIProofContract();
 
   return trustAIProof.verifyProof(normalizedHash);
+}
+
+export async function mintContentNFT(contentHash) {
+  const normalizedHash = normalizeContentHash(contentHash);
+  const trustAIProof = await getVerifiedTrustAIProofContract();
+  const trustAIContentNFT = getTrustAIContentNFTContract();
+  const contractAddress = await trustAIContentNFT.getAddress();
+  const walletAddress = await trustAIContentNFT.runner.getAddress();
+  const explorerContext = await getExplorerContext(trustAIContentNFT.runner);
+
+  logNFTMintDebug("Starting mint", {
+    contractAddress,
+    chainId: explorerContext.chainId,
+    walletAddress,
+    mintFunction: TRUSTAI_NFT_MINT_FUNCTION,
+    mintArguments: [normalizedHash],
+  });
+
+  const hasVerifiedProof = await trustAIProof.verifyProof(normalizedHash);
+
+  logNFTMintDebug("Proof check completed", {
+    contentHash: normalizedHash,
+    hasVerifiedProof,
+  });
+
+  if (!hasVerifiedProof) {
+    const error = new Error(
+      "NFT minting requires verified blockchain proof for the current content."
+    );
+    error.code = "NFT_REQUIRES_VERIFIED_PROOF";
+    throw error;
+  }
+
+  let existingNFT;
+
+  try {
+    existingNFT = await findTokenizedContent(normalizedHash);
+    logNFTMintDebug("Duplicate lookup completed", {
+      contentHash: normalizedHash,
+      existingTokenId: existingNFT?.tokenId || "",
+    });
+  } catch (error) {
+    console.error("[NFT Mint] Duplicate lookup failed", getBlockchainErrorDetails(error));
+    throw createMintError(error, "duplicate lookup");
+  }
+
+  if (existingNFT) {
+    const error = new Error("This content has already been tokenized.");
+    error.code = "NFT_DUPLICATE_CONTENT";
+    error.nft = existingNFT;
+    throw error;
+  }
+
+  try {
+    await trustAIContentNFT[TRUSTAI_NFT_MINT_FUNCTION].staticCall(normalizedHash);
+    logNFTMintDebug("Static mint simulation completed", {
+      mintFunction: TRUSTAI_NFT_MINT_FUNCTION,
+      mintArguments: [normalizedHash],
+    });
+  } catch (error) {
+    console.error(
+      "[NFT Mint] Static mint simulation failed",
+      getBlockchainErrorDetails(error)
+    );
+    throw createMintError(error, "static simulation");
+  }
+
+  let estimatedGas;
+
+  try {
+    estimatedGas =
+      await trustAIContentNFT[TRUSTAI_NFT_MINT_FUNCTION].estimateGas(
+        normalizedHash
+      );
+    logNFTMintDebug("Gas estimate completed", {
+      estimatedGas: estimatedGas.toString(),
+    });
+  } catch (error) {
+    console.error("[NFT Mint] Gas estimation failed", getBlockchainErrorDetails(error));
+    throw createMintError(error, "gas estimation");
+  }
+
+  let transaction;
+
+  try {
+    transaction = await trustAIContentNFT[TRUSTAI_NFT_MINT_FUNCTION](
+      normalizedHash
+    );
+    logNFTMintDebug("Transaction submitted", {
+      transactionHash: transaction.hash,
+    });
+  } catch (error) {
+    console.error(
+      "[NFT Mint] Transaction submission failed",
+      getBlockchainErrorDetails(error)
+    );
+    throw createMintError(error, "transaction submission");
+  }
+
+  let receipt;
+
+  try {
+    receipt = await transaction.wait();
+    logNFTMintDebug("Transaction receipt received", {
+      transactionHash: receipt.hash,
+      status: receipt.status,
+      blockNumber: receipt.blockNumber,
+      gasUsed: receipt.gasUsed?.toString(),
+    });
+  } catch (error) {
+    console.error(
+      "[NFT Mint] Transaction receipt failed",
+      getBlockchainErrorDetails(error)
+    );
+    throw createMintError(error, "receipt confirmation");
+  }
+
+  const contractInterface = new Interface(TRUSTAI_NFT_ABI);
+  let tokenId;
+  let tokenEvent;
+
+  for (const log of receipt.logs) {
+    try {
+      const parsedLog = contractInterface.parseLog(log);
+
+      if (parsedLog?.name === "ContentTokenized") {
+        tokenId = parsedLog.args.tokenId;
+        tokenEvent = {
+          transactionHash: receipt.hash,
+          args: parsedLog.args,
+        };
+        break;
+      }
+    } catch {
+      // Ignore logs emitted by other contracts in the transaction receipt.
+    }
+  }
+
+  if (!tokenId) {
+    throw new Error("ContentTokenized event was not found in receipt");
+  }
+
+  const nft = await readNFTDetails(trustAIContentNFT, tokenId, tokenEvent);
+
+  return {
+    ...nft,
+    transactionHash: receipt.hash,
+    receiptStatus: Number(receipt.status),
+  };
+}
+
+export async function verifyContentNFT(tokenId) {
+  const normalizedTokenId = normalizeTokenId(tokenId);
+  const trustAIContentNFT = getTrustAIContentNFTContract();
+
+  try {
+    const eventLog = await getTokenEvent(trustAIContentNFT, normalizedTokenId);
+    return await readNFTDetails(trustAIContentNFT, normalizedTokenId, eventLog);
+  } catch (error) {
+    if (
+      error.code === "CALL_EXCEPTION" ||
+      error.reason?.includes("nonexistent token") ||
+      error.message?.includes("nonexistent token") ||
+      error.message?.includes("ERC721NonexistentToken")
+    ) {
+      const contractAddress = await trustAIContentNFT.getAddress();
+      const explorerContext = await getExplorerContext(trustAIContentNFT.runner);
+
+      return addExplorerLinks(
+        {
+        exists: false,
+        tokenId: normalizedTokenId.toString(),
+          contractAddress,
+          chainId: explorerContext.chainId,
+          networkName: explorerContext.networkName,
+          explorerBaseUrl: explorerContext.explorerBaseUrl,
+        },
+        explorerContext.explorerBaseUrl
+      );
+    }
+
+    throw error;
+  }
 }

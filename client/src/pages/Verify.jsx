@@ -7,7 +7,9 @@ import ClaimCard from "../components/ClaimCard.jsx";
 import SectionHeading from "../components/SectionHeading.jsx";
 import TrustScore from "../components/TrustScore.jsx";
 import {
+  mintContentAsNFT,
   storeProofOnBlockchain,
+  verifyContentNFT,
   verifyProofOnBlockchain,
 } from "../services/blockchainService.js";
 import { analyzeContent } from "../services/verificationService.js";
@@ -125,6 +127,33 @@ function formatReportValue(value, fallback = "--") {
   return value === null || value === undefined || value === "" ? fallback : value;
 }
 
+function formatNftTimestamp(timestamp) {
+  if (!timestamp) {
+    return "Timestamp unavailable";
+  }
+
+  return new Date(Number(timestamp) * 1000).toLocaleString();
+}
+
+function ExplorerValue({ href, children }) {
+  const className = "font-mono break-all text-white";
+
+  if (!href) {
+    return <span className={className}>{children}</span>;
+  }
+
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      className={`${className} underline decoration-cyan-200/40 underline-offset-4 transition hover:text-cyan-100`}
+    >
+      {children}
+    </a>
+  );
+}
+
 function getContentIntegrityStatus(integrityCheck, proofError) {
   if (proofError) return "Verification error";
   if (integrityCheck?.status === "match") return "Verified";
@@ -158,13 +187,21 @@ function Verify() {
   const [isLoading, setIsLoading] = useState(false);
   const [isStoringProof, setIsStoringProof] = useState(false);
   const [isVerifyingProof, setIsVerifyingProof] = useState(false);
+  const [isMintingNFT, setIsMintingNFT] = useState(false);
+  const [isVerifyingNFT, setIsVerifyingNFT] = useState(false);
   const [proofResult, setProofResult] = useState(null);
+  const [nftResult, setNftResult] = useState(null);
+  const [nftTokenId, setNftTokenId] = useState("");
+  const [nftVerificationResult, setNftVerificationResult] = useState(null);
   const [integrityCheck, setIntegrityCheck] = useState(null);
   const [proofError, setProofError] = useState("");
+  const [nftError, setNftError] = useState("");
+  const [nftVerificationError, setNftVerificationError] = useState("");
   const [isTakingLonger, setIsTakingLonger] = useState(false);
   const [isWhyOpen, setIsWhyOpen] = useState(false);
   const [historyItemId, setHistoryItemId] = useState(null);
   const [previousProofResult, setPreviousProofResult] = useState(null);
+  const [analyzedContent, setAnalyzedContent] = useState("");
 
   useEffect(() => {
     const routedContent = location.state?.content;
@@ -177,6 +214,17 @@ function Verify() {
     }
   }, [location.state]);
 
+  function handleContentChange(event) {
+    setContent(event.target.value);
+
+    if (integrityCheck || nftResult || nftError) {
+      setIntegrityCheck(null);
+      setNftResult(null);
+      setNftError("");
+      setSuccessMessage("");
+    }
+  }
+
   async function handleAnalyze() {
     if (isLoading) return;
 
@@ -186,11 +234,18 @@ function Verify() {
     setSuccessMessage("");
     setResult(null);
     setProofResult(null);
+    setNftResult(null);
+    setNftVerificationResult(null);
     setIntegrityCheck(null);
     setProofError("");
+    setNftError("");
+    setNftVerificationError("");
     setIsTakingLonger(false);
     setIsWhyOpen(false);
     setHistoryItemId(null);
+    setPreviousProofResult(null);
+    setAnalyzedContent("");
+    clearActiveBlockchainProof();
 
     if (!trimmedContent) {
       setError("Paste content to analyze first.");
@@ -210,6 +265,7 @@ function Verify() {
       setIsLoading(true);
       const verification = await analyzeContent(trimmedContent);
       setResult(verification);
+      setAnalyzedContent(trimmedContent);
       const historyItem = saveVerificationHistoryItem(verification);
       setHistoryItemId(historyItem.id);
       setSuccessMessage("Verification completed successfully.");
@@ -228,12 +284,17 @@ function Verify() {
     setError("");
     setSuccessMessage("");
     setProofResult(null);
+    setNftResult(null);
+    setNftVerificationResult(null);
     setIntegrityCheck(null);
     setProofError("");
+    setNftError("");
+    setNftVerificationError("");
     setIsTakingLonger(false);
     setIsWhyOpen(false);
     setHistoryItemId(null);
     setPreviousProofResult(null);
+    setAnalyzedContent("");
     clearActiveBlockchainProof();
   }
 
@@ -249,10 +310,11 @@ function Verify() {
   }
 
   async function handleStoreProof() {
-    if (isStoringProof || isVerifyingProof) return;
+    if (isStoringProof || isVerifyingProof || isMintingNFT) return;
     if (!result?.contentHash) return;
 
     setProofError("");
+    setNftError("");
     setSuccessMessage("");
     setIntegrityCheck(null);
 
@@ -277,17 +339,28 @@ function Verify() {
   }
 
   async function handleVerifyProof() {
-    if (isVerifyingProof || isStoringProof) return;
+    if (isVerifyingProof || isStoringProof || isMintingNFT) return;
     if (!result?.contentHash) return;
 
     setProofError("");
+    setNftError("");
     setSuccessMessage("");
     setIntegrityCheck(null);
 
     try {
       setIsVerifyingProof(true);
-      const currentHash = await generateContentHash(content.trim());
-      const activeProof = previousProofResult || getActiveBlockchainProof();
+      const currentContent = content.trim();
+      const currentHash =
+        currentContent === analyzedContent && result?.contentHash
+          ? normalizeHash(result.contentHash)
+          : await generateContentHash(currentContent);
+      const activeProofCandidate =
+        previousProofResult || getActiveBlockchainProof();
+      const activeProof =
+        normalizeHash(activeProofCandidate?.contentHash) ===
+        normalizeHash(result.contentHash)
+          ? activeProofCandidate
+          : null;
       const originalHash = activeProof?.contentHash;
       const blockchainResult = await verifyProofOnBlockchain(
         currentHash,
@@ -332,12 +405,83 @@ function Verify() {
     }
   }
 
+  async function handleMintNFT() {
+    if (isMintingNFT || isStoringProof || isVerifyingProof || isVerifyingNFT) return;
+    const verifiedContentHash =
+      integrityCheck?.status === "match" && !integrityCheck.tampered
+        ? integrityCheck.currentHash
+        : "";
+
+    if (!verifiedContentHash) {
+      setNftError("Verify blockchain proof before minting NFT.");
+      return;
+    }
+
+    setNftError("");
+    setProofError("");
+    setSuccessMessage("");
+
+    try {
+      setIsMintingNFT(true);
+      const nft = await mintContentAsNFT(verifiedContentHash);
+      setNftResult(nft);
+      setNftTokenId(nft.tokenId);
+      setNftVerificationResult(nft);
+      setSuccessMessage("NFT minted successfully.");
+    } catch (err) {
+      if (err.nft) {
+        setNftVerificationResult(err.nft);
+        setNftTokenId(err.nft.tokenId || "");
+      }
+
+      setNftError(err.message || "Unable to mint NFT. Please try again.");
+    } finally {
+      setIsMintingNFT(false);
+    }
+  }
+
+  async function handleVerifyNFT() {
+    if (isBlockchainActionRunning || isVerifyingNFT) return;
+
+    const trimmedTokenId = nftTokenId.trim();
+
+    setNftVerificationError("");
+    setNftVerificationResult(null);
+    setSuccessMessage("");
+
+    if (!trimmedTokenId) {
+      setNftVerificationError("Enter an NFT Token ID.");
+      return;
+    }
+
+    try {
+      setIsVerifyingNFT(true);
+      const nft = await verifyContentNFT(trimmedTokenId);
+      setNftVerificationResult(nft);
+      setSuccessMessage("NFT verification completed.");
+    } catch (err) {
+      setNftVerificationError(
+        err.message || "Unable to verify NFT on blockchain. Please try again."
+      );
+    } finally {
+      setIsVerifyingNFT(false);
+    }
+  }
+
   const claimStats = getClaimStats(result?.claims);
   const extractedClaims = Array.isArray(result?.claims) ? result.claims : [];
   const scoreBreakdown = getScoreBreakdown(result?.categories);
   const calculatedTrustScore = Math.round(
     scoreBreakdown.reduce((total, item) => total + item.contribution, 0)
   );
+  const isBlockchainActionRunning =
+    isStoringProof || isVerifyingProof || isMintingNFT || isVerifyingNFT;
+  const isContentVerifiedForMint =
+    integrityCheck?.status === "match" && !integrityCheck.tampered;
+  const verifiedContentHash = isContentVerifiedForMint
+    ? integrityCheck.currentHash
+    : "";
+  const canMintNFT = Boolean(verifiedContentHash) && !nftResult;
   const reportItems = [
     {
       label: "Trust Score",
@@ -410,7 +554,7 @@ function Verify() {
 
           <textarea
             value={content}
-            onChange={(event) => setContent(event.target.value)}
+            onChange={handleContentChange}
             rows="13"
             className="input-glass mt-4 min-h-80 resize-y leading-7"
             placeholder="Paste content here..."
@@ -532,7 +676,7 @@ function Verify() {
                 <Button
                   variant="secondary"
                   onClick={handleCopyHash}
-                  disabled={isStoringProof || isVerifyingProof}
+                  disabled={isBlockchainActionRunning}
                 >
                   Copy Hash
                 </Button>
@@ -547,7 +691,7 @@ function Verify() {
               <div className="mt-5 flex flex-col gap-3 sm:flex-row">
                 <Button
                   onClick={handleStoreProof}
-                  disabled={isStoringProof || isVerifyingProof || Boolean(proofResult)}
+                  disabled={isBlockchainActionRunning || Boolean(proofResult)}
                 >
                   {isStoringProof
                     ? "Storing Proof..."
@@ -556,13 +700,25 @@ function Verify() {
                 <Button
                   variant="secondary"
                   onClick={handleVerifyProof}
-                  disabled={isVerifyingProof || isStoringProof}
+                  disabled={isBlockchainActionRunning}
                 >
                   {isVerifyingProof
                     ? "Verifying Proof..."
                     : "Verify Blockchain Proof"}
                 </Button>
+                <Button
+                  variant="secondary"
+                  onClick={handleMintNFT}
+                  disabled={isBlockchainActionRunning || !canMintNFT}
+                >
+                  {isMintingNFT ? "Minting NFT..." : "Mint as NFT"}
+                </Button>
               </div>
+              {!isContentVerifiedForMint && !integrityCheck && !nftResult && (
+                <div className="mt-5 rounded-2xl border border-cyan-300/20 bg-cyan-300/10 p-4 text-cyan-50">
+                  Verify blockchain proof before minting NFT.
+                </div>
+              )}
               {integrityCheck?.status === "match" && (
                 <div
                   className="mt-5 rounded-2xl border border-emerald-300/25 bg-emerald-300/10 p-4 text-emerald-50"
@@ -644,9 +800,195 @@ function Verify() {
                   </div>
                 </div>
               )}
+              {nftResult && (
+                <div className="mt-5 rounded-2xl border border-cyan-300/25 bg-cyan-300/10 p-4 text-cyan-50">
+                  <p className="font-semibold">NFT Minted</p>
+                  <div className="mt-3 space-y-2 text-sm">
+                    <p>
+                      <span className="text-cyan-100/80">NFT Token ID:</span>{" "}
+                      <span className="font-mono break-all text-white">
+                        {nftResult.tokenId}
+                      </span>
+                    </p>
+                    <p>
+                      <span className="text-cyan-100/80">
+                        NFT Contract Address:
+                      </span>{" "}
+                      <ExplorerValue href={nftResult.contractUrl}>
+                        {nftResult.contractAddress}
+                      </ExplorerValue>
+                    </p>
+                    <p>
+                      <span className="text-cyan-100/80">
+                        Transaction Hash:
+                      </span>{" "}
+                      <ExplorerValue href={nftResult.transactionUrl}>
+                        {nftResult.transactionHash}
+                      </ExplorerValue>
+                    </p>
+                    <p>
+                      <span className="text-cyan-100/80">Content Hash:</span>{" "}
+                      <span className="font-mono break-all text-white">
+                        {nftResult.contentHash}
+                      </span>
+                    </p>
+                    <p>
+                      <span className="text-cyan-100/80">Creator/Owner:</span>{" "}
+                      <span className="font-mono break-all text-white">
+                        {nftResult.creator || nftResult.owner}
+                      </span>
+                    </p>
+                    {nftResult.owner && nftResult.owner !== nftResult.creator && (
+                      <p>
+                        <span className="text-cyan-100/80">Current Owner:</span>{" "}
+                        <span className="font-mono break-all text-white">
+                          {nftResult.owner}
+                        </span>
+                      </p>
+                    )}
+                    <p>
+                      <span className="text-cyan-100/80">Mint Timestamp:</span>{" "}
+                      <span className="text-white">
+                        {formatNftTimestamp(nftResult.mintTimestamp)}
+                      </span>
+                    </p>
+                    <p>
+                      <span className="text-cyan-100/80">
+                        Verification Status:
+                      </span>{" "}
+                      <span className="text-white">
+                        {nftResult.verificationStatus}
+                      </span>
+                    </p>
+                    {nftResult.tokenUri ? (
+                      <p>
+                        <span className="text-cyan-100/80">Token URI:</span>{" "}
+                        <span className="font-mono break-all text-white">
+                          {nftResult.tokenUri}
+                        </span>
+                      </p>
+                    ) : (
+                      <p className="text-cyan-100/80">
+                        The deployed NFT contract stores on-chain content hash,
+                        creator, and timestamp, but no custom token URI metadata.
+                      </p>
+                    )}
+                    {nftResult.chainId && (
+                      <p>
+                        <span className="text-cyan-100/80">Network:</span>{" "}
+                        <span className="text-white">
+                          {nftResult.networkName || `Chain ${nftResult.chainId}`}
+                        </span>
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              <div className="mt-5 rounded-2xl border border-white/10 bg-white/[0.04] p-4">
+                <p className="font-semibold text-white">Verify NFT</p>
+                <div className="mt-4 flex flex-col gap-3 sm:flex-row">
+                  <input
+                    value={nftTokenId}
+                    onChange={(event) => setNftTokenId(event.target.value)}
+                    className="input-glass"
+                    inputMode="numeric"
+                    placeholder="Enter NFT Token ID"
+                    disabled={isBlockchainActionRunning}
+                  />
+                  <Button
+                    variant="secondary"
+                    onClick={handleVerifyNFT}
+                    disabled={isBlockchainActionRunning || !nftTokenId.trim()}
+                  >
+                    {isVerifyingNFT ? "Verifying NFT..." : "Verify NFT"}
+                  </Button>
+                </div>
+                {nftVerificationResult && (
+                  <div className="mt-4 rounded-2xl border border-cyan-300/20 bg-cyan-300/10 p-4 text-sm text-cyan-50">
+                    <p className="font-semibold">
+                      {nftVerificationResult.exists
+                        ? "NFT exists"
+                        : "NFT does not exist"}
+                    </p>
+                    <div className="mt-3 space-y-2">
+                      <p>
+                        <span className="text-cyan-100/80">Token ID:</span>{" "}
+                        <span className="font-mono break-all text-white">
+                          {nftVerificationResult.tokenId}
+                        </span>
+                      </p>
+                      <p>
+                        <span className="text-cyan-100/80">Contract:</span>{" "}
+                        <ExplorerValue href={nftVerificationResult.contractUrl}>
+                          {nftVerificationResult.contractAddress}
+                        </ExplorerValue>
+                      </p>
+                      {nftVerificationResult.exists && (
+                        <>
+                          <p>
+                            <span className="text-cyan-100/80">Owner:</span>{" "}
+                            <span className="font-mono break-all text-white">
+                              {nftVerificationResult.owner}
+                            </span>
+                          </p>
+                          <p>
+                            <span className="text-cyan-100/80">
+                              Associated Content Hash:
+                            </span>{" "}
+                            <span className="font-mono break-all text-white">
+                              {nftVerificationResult.contentHash}
+                            </span>
+                          </p>
+                          <p>
+                            <span className="text-cyan-100/80">
+                              Mint Timestamp:
+                            </span>{" "}
+                            <span className="text-white">
+                              {formatNftTimestamp(
+                                nftVerificationResult.mintTimestamp
+                              )}
+                            </span>
+                          </p>
+                          <p>
+                            <span className="text-cyan-100/80">
+                              Verification Status:
+                            </span>{" "}
+                            <span className="text-white">
+                              {nftVerificationResult.verificationStatus}
+                            </span>
+                          </p>
+                          {nftVerificationResult.transactionHash && (
+                            <p>
+                              <span className="text-cyan-100/80">
+                                Transaction Hash:
+                              </span>{" "}
+                              <ExplorerValue
+                                href={nftVerificationResult.transactionUrl}
+                              >
+                                {nftVerificationResult.transactionHash}
+                              </ExplorerValue>
+                            </p>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  </div>
+                )}
+                {nftVerificationError && (
+                  <div className="mt-4 rounded-2xl border border-red-500/30 bg-red-400/10 p-4 text-red-100">
+                    {nftVerificationError}
+                  </div>
+                )}
+              </div>
               {proofError && (
                 <div className="mt-5 rounded-2xl border border-red-500/30 bg-red-400/10 p-4 text-red-100">
                   {proofError}
+                </div>
+              )}
+              {nftError && (
+                <div className="mt-5 rounded-2xl border border-red-500/30 bg-red-400/10 p-4 text-red-100">
+                  {nftError}
                 </div>
               )}
             </Card>
