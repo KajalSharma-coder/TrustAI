@@ -8,6 +8,7 @@
     "client": "npm --prefix client run dev",
     "server": "npm --prefix server run dev",
     "dev": "concurrently -n Backend,Frontend \"npm run dev --prefix server\" \"npm run dev --prefix client\"",
+    "postinstall": "npm --prefix client install --include=dev",
     "build": "npm --prefix client run build",
     "compile": "hardhat compile"
   },
