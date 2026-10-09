@@ -278,6 +278,20 @@ TrustAI-main/
 ```
 
 ---
+# Snapshots
+
+<img width="1728" height="880" alt="image" src="https://github.com/user-attachments/assets/975d9cf8-0b69-466f-9658-2f8f5264f3bd" />
+
+<img width="1798" height="887" alt="image" src="https://github.com/user-attachments/assets/8a306735-dc4a-4c64-828b-c9f07b5e3fed" />
+
+<img width="712" height="885" alt="image" src="https://github.com/user-attachments/assets/2298f614-f461-476e-92cd-495a9b4a5367" />
+
+<img width="807" height="766" alt="image" src="https://github.com/user-attachments/assets/954121ac-5440-47e6-ae75-8ee9fcaaab59" />
+
+<img width="793" height="872" alt="image" src="https://github.com/user-attachments/assets/66c6ce14-5df6-4473-a995-fa472b804148" />
+
+<img width="816" height="910" alt="image" src="https://github.com/user-attachments/assets/edfe1872-2d5f-4358-8731-a4023b0da939" />
+
 
 # ⚙️ Getting Started
 
